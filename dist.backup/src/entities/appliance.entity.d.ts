@@ -1,0 +1,33 @@
+import { BusinessEntity } from './business.entity.js';
+import { QrCodeEntity } from './qr-code.entity.js';
+import { DocumentEntity } from './document.entity.js';
+import { WarrantyRegistrationEntity } from './warranty-registration.entity.js';
+import { ClaimEntity } from './claim.entity.js';
+import { BookingEntity } from './booking.entity.js';
+import { ChatSessionEntity } from './chat-session.entity.js';
+import { OfferEntity } from './offer.entity.js';
+import { ActivityEntity } from './activity.entity.js';
+export declare class ApplianceEntity {
+    id: string;
+    business_id: string;
+    name: string;
+    model: string;
+    sku: string;
+    category: string;
+    status: string;
+    color: string;
+    bot_name: string;
+    bot_welcome: string;
+    bot_tone: string;
+    scans_count: number;
+    created_at: Date;
+    business: BusinessEntity;
+    qr_codes: QrCodeEntity[];
+    documents: DocumentEntity[];
+    warranties: WarrantyRegistrationEntity[];
+    claims: ClaimEntity[];
+    bookings: BookingEntity[];
+    chat_sessions: ChatSessionEntity[];
+    offers: OfferEntity[];
+    activities: ActivityEntity[];
+}

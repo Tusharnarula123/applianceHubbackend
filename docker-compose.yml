@@ -1,0 +1,54 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    volumes:
+      - ../..:/workspaces:cached
+
+    # Overrides default command so things don't shut down after the process ends.
+    # This allows Dev Container to attach and run npm start:dev
+    command: sleep infinity
+
+    # Runs app on the same network as the database container
+    network_mode: service:db
+
+    environment:
+      PORT: 3001
+      DB_HOST: localhost
+      DB_PORT: 3306
+      DB_USERNAME: root
+      DB_PASSWORD: root123
+      DB_NAME: appliancehub
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      NODE_ENV: development
+
+  db:
+    image: mysql:8.0.40
+    restart: unless-stopped
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+    ports:
+      - "3306:3306"
+      - "6379:6379"
+
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: appliancehub
+      TZ: UTC
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    network_mode: service:db
+
+volumes:
+  mysql_data:
+  redis_data:

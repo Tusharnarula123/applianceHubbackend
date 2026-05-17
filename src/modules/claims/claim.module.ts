@@ -1,0 +1,14 @@
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { ClaimEntity } from '../../entities/claim.entity.js';
+import { ClaimController } from './claim.controller.js';
+import { ClaimService } from './claim.service.js';
+import { CacheService } from '../../common/cache.service.js';
+
+@Module({
+  imports: [TypeOrmModule.forFeature([ClaimEntity])],
+  controllers: [ClaimController],
+  providers: [ClaimService, CacheService],
+  exports: [ClaimService],
+})
+export class ClaimModule {}

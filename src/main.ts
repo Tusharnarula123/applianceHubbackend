@@ -16,10 +16,21 @@ if (typeof globalThis !== 'undefined') {
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { json, urlencoded } from 'express';
+import { join } from 'path';
+
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100MB
 
 async function bootstrap() {
   const { AppModule } = await import('./app.module.js');
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+  });
+
+  app.use(json({ limit: MAX_UPLOAD_BYTES }));
+  app.use(urlencoded({ extended: true, limit: MAX_UPLOAD_BYTES }));
+  app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads/' });
 
   // Configure Swagger/OpenAPI
   const config = new DocumentBuilder()

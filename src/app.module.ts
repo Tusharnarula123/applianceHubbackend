@@ -10,6 +10,7 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import databaseConfig from './config/database.config.js';
 import redisConfig from './config/redis.config.js';
+import appConfig from './config/app.config.js';
 import { ApplianceModule } from './modules/appliances/appliance.module.js';
 import { BusinessModule } from './modules/businesses/business.module.js';
 import { ClaimModule } from './modules/claims/claim.module.js';
@@ -21,6 +22,7 @@ import { UploadModule } from './modules/upload/upload.module.js';
 import { PdfModule } from './modules/pdf/pdf.module.js';
 import { SupportModule } from './modules/support/support.module.js';
 import { UsersModule } from './modules/users/users.module.js';
+import { QrCodeModule } from './modules/qr/qr-code.module.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -29,7 +31,7 @@ const __dirname = dirname(__filename);
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [databaseConfig, redisConfig],
+      load: [databaseConfig, redisConfig, appConfig],
     }),
     // Redis Cache Manager
     CacheModule.registerAsync({
@@ -55,7 +57,7 @@ const __dirname = dirname(__filename);
         database: config.get('database.database'),
         entities: [join(__dirname, '**', '*.entity.{ts,js}')],
         migrations: [join(__dirname, 'database', 'migrations', '*.{ts,js}')],
-        synchronize: process.env.NODE_ENV === 'development',
+        synchronize: false,
         logging: process.env.NODE_ENV !== 'production',
       }),
     }),
@@ -71,6 +73,7 @@ const __dirname = dirname(__filename);
     ActivityModule,
     SupportModule,
     UsersModule,
+    QrCodeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

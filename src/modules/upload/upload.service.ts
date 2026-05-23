@@ -4,13 +4,32 @@ import { Repository } from 'typeorm';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import type { File as MulterFile } from 'multer';
-import { DocumentEntity } from '../../entities/document.entity.js';
+import {
+  DocumentEntity,
+  DOCUMENT_FILE_TYPES,
+  type DocumentFileType,
+} from '../../entities/document.entity.js';
 import { v4 as uuidv4 } from 'uuid';
+
+const DOCUMENT_TYPE_ALIASES: Record<string, DocumentFileType> = {
+  document: 'Manual',
+  manual: 'Manual',
+  warranty: 'Warranty',
+  'parts catalog': 'Parts Catalog',
+  'parts-catalog': 'Parts Catalog',
+  partscatalog: 'Parts Catalog',
+  'error codes': 'Error Codes',
+  'error-codes': 'Error Codes',
+  errorcodes: 'Error Codes',
+  'service guide': 'Service Guide',
+  'service-guide': 'Service Guide',
+  serviceguide: 'Service Guide',
+};
 
 @Injectable()
 export class UploadService {
   private readonly uploadDir = './uploads';
-  private readonly maxFileSize = 50 * 1024 * 1024; // 50MB
+  private readonly maxFileSize = 100 * 1024 * 1024; // 100MB
   private readonly allowedMimeTypes = [
     'application/pdf',
     'image/jpeg',
@@ -25,7 +44,27 @@ export class UploadService {
     private documentRepository: Repository<DocumentEntity>,
   ) {}
 
-  async uploadDocument(file: MulterFile, applianceId: string) {
+  resolveDocumentType(documentType?: string): DocumentFileType {
+    if (!documentType?.trim()) {
+      return 'Manual';
+    }
+
+    const normalized = documentType.trim();
+    if ((DOCUMENT_FILE_TYPES as readonly string[]).includes(normalized)) {
+      return normalized as DocumentFileType;
+    }
+
+    const alias = DOCUMENT_TYPE_ALIASES[normalized.toLowerCase()];
+    if (alias) {
+      return alias;
+    }
+
+    throw new BadRequestException(
+      `Invalid document_type. Allowed: ${DOCUMENT_FILE_TYPES.join(', ')}`,
+    );
+  }
+
+  async uploadDocument(file: MulterFile, applianceId: string, documentType?: string) {
     if (!file) {
       throw new BadRequestException('No file provided');
     }
@@ -60,7 +99,7 @@ export class UploadService {
       name: file.originalname,
       file_url: `/uploads/${filename}`,
       file_size_bytes: file.size,
-      file_type: path.extname(file.originalname).substring(1),
+      file_type: this.resolveDocumentType(documentType),
       mime_type: file.mimetype,
     });
 
@@ -146,7 +185,7 @@ export class UploadService {
 
   private validateFile(file: MulterFile) {
     if (file.size > this.maxFileSize) {
-      throw new BadRequestException('File size exceeds maximum limit of 50MB');
+      throw new BadRequestException('File size exceeds maximum limit of 100MB');
     }
 
     if (!this.allowedMimeTypes.includes(file.mimetype)) {

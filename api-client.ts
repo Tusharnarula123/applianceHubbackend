@@ -1,10 +1,25 @@
+/** Resolve API base URL for Vite, Next.js, or Node */
+export function resolveApiBaseUrl(): string {
+  const meta = typeof import.meta !== 'undefined' ? (import.meta as unknown as { env?: Record<string, string> }) : null;
+  if (meta?.env?.VITE_API_URL) {
+    return meta.env.VITE_API_URL.replace(/\/$/, '');
+  }
+  if (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, '');
+  }
+  if (typeof process !== 'undefined' && process.env?.REACT_APP_API_URL) {
+    return process.env.REACT_APP_API_URL.replace(/\/$/, '');
+  }
+  return 'http://localhost:3001';
+}
+
 class ApplianceHubAPIClient {
   baseURL: string;
   accessToken: string | null = null;
   refreshToken: string | null = null;
 
-  constructor(baseURL = 'http://localhost:3001') {
-    this.baseURL = baseURL;
+  constructor(baseURL?: string) {
+    this.baseURL = (baseURL ?? resolveApiBaseUrl()).replace(/\/$/, '');
     this.loadTokensFromStorage();
   }
 
@@ -85,14 +100,34 @@ class ApplianceHubAPIClient {
       headers['Authorization'] = `Bearer ${this.accessToken}`;
     }
 
+    // Do not set Content-Type — the browser must set multipart boundary automatically.
     const response = await fetch(url, {
       method: 'POST',
       headers,
       body: formData,
     });
 
+    const contentType = response.headers.get('content-type') ?? '';
+    const isJson = contentType.includes('application/json');
+
     if (!response.ok) {
-      throw new Error(`Upload failed: ${response.statusText}`);
+      let message = response.statusText;
+      if (isJson) {
+        const error = await response.json().catch(() => ({}));
+        message =
+          (Array.isArray(error.message) ? error.message.join(', ') : error.message) ||
+          message;
+      } else {
+        const text = await response.text().catch(() => '');
+        if (text && !text.startsWith('------')) {
+          message = text.slice(0, 200);
+        }
+      }
+      throw new Error(message || 'Upload failed');
+    }
+
+    if (!isJson) {
+      throw new Error('Upload succeeded but server returned a non-JSON response');
     }
 
     return response.json();
@@ -168,11 +203,44 @@ class ApplianceHubAPIClient {
   }
 
   async getAppliances(businessId: string, limit = 20, offset = 0) {
-    return this.request(`/api/appliances?business_id=${businessId}&limit=${limit}&offset=${offset}`, 'GET');
+    return this.request(
+      `/api/appliances/business/${businessId}?limit=${limit}&offset=${offset}`,
+      'GET',
+    );
   }
 
   async getAppliance(applianceId: string) {
     return this.request(`/api/appliances/${applianceId}`, 'GET');
+  }
+
+  async getApplianceDocuments(applianceId: string) {
+    return this.request(`/api/appliances/${applianceId}/documents`, 'GET');
+  }
+
+  async getApplianceClaims(applianceId: string) {
+    return this.request(`/api/appliances/${applianceId}/claims`, 'GET');
+  }
+
+  /** Fetches QR codes; backend auto-generates if missing and appliance has a model */
+  async getApplianceQrCodes(applianceId: string) {
+    return this.request(`/api/appliances/${applianceId}/qrcodes`, 'GET');
+  }
+
+  async generateApplianceQrCode(applianceId: string, size = '150x150') {
+    return this.request(`/api/appliances/${applianceId}/qrcodes?size=${encodeURIComponent(size)}`, 'POST');
+  }
+
+  async lookupApplianceByModel(model: string) {
+    return this.request(`/api/qr-codes/lookup?model=${encodeURIComponent(model)}`, 'GET');
+  }
+
+  async recordQrScan(qrCodeId: string) {
+    return this.request(`/api/qr-codes/${qrCodeId}/scan`, 'POST');
+  }
+
+  /** Use for <img src> — reads image_url from API */
+  getQrImageSrc(qr: { id: string; image_url?: string; image_src?: string }): string {
+    return qr.image_url ?? qr.image_src ?? `${this.baseURL}/api/qr-codes/${qr.id}/image`;
   }
 
   async createAppliance(businessId: string, data: any) {
@@ -204,15 +272,18 @@ class ApplianceHubAPIClient {
   }
 
   async uploadDocument(applianceId: string, file: File, documentType = 'document') {
-    return this.uploadFile(`/upload/document/${applianceId}?document_type=${documentType}`, file);
+    return this.uploadFile(
+      `/api/upload/document/${applianceId}?document_type=${documentType}`,
+      file,
+    );
   }
 
   async uploadImage(file: File) {
-    return this.uploadFile('/upload/image', file);
+    return this.uploadFile('/api/upload/image', file);
   }
 
   async deleteFile(fileId: string) {
-    return this.request(`/upload/${fileId}`, 'DELETE');
+    return this.request(`/api/upload/${fileId}`, 'DELETE');
   }
 
   async generateWarrantyPDF(warrantyId: string) {

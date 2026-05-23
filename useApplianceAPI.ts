@@ -253,6 +253,67 @@ export function useAppliances(businessId: string, limit: number = 20) {
 }
 
 /**
+ * Hook for appliance documents
+ */
+export function useApplianceDocuments(applianceId: string) {
+  return useAPI(
+    () => apiClient.getApplianceDocuments(applianceId),
+    !!applianceId,
+  );
+}
+
+/**
+ * Hook for appliance QR codes (auto-generated on backend when missing)
+ */
+export function useApplianceQrCodes(applianceId: string) {
+  const [state, setState] = useState({
+    qrCodes: [] as Array<{
+      id: string;
+      image_src: string;
+      image_url: string;
+      url: string;
+      model: string;
+      scan_count: number;
+    }>,
+    model: '' as string,
+    loading: true,
+    error: null as Error | null,
+  });
+
+  const load = useCallback(async () => {
+    if (!applianceId) return;
+    setState((prev) => ({ ...prev, loading: true, error: null }));
+    try {
+      const result = await apiClient.getApplianceQrCodes(applianceId);
+      const qrCodes = (result.qr_codes ?? []).map(
+        (qr: { id: string; image_url?: string; url: string; model: string; scan_count: number }) => ({
+          ...qr,
+          image_url: apiClient.getQrImageSrc(qr),
+        }),
+      );
+      setState({
+        qrCodes,
+        model: result.model ?? '',
+        loading: false,
+        error: null,
+      });
+    } catch (error) {
+      setState((prev) => ({
+        ...prev,
+        loading: false,
+        error: error instanceof Error ? error : new Error('Failed to load QR codes'),
+      }));
+    }
+  }, [applianceId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return { ...state, refetch: load };
+}
+
+/**
  * Hook for file upload
  */
 export function useFileUpload() {
@@ -370,6 +431,8 @@ export default {
   useDashboard,
   useAuth,
   useAppliances,
+  useApplianceDocuments,
+  useApplianceQrCodes,
   useFileUpload,
   usePDF,
 };

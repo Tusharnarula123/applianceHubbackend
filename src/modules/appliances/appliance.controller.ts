@@ -77,15 +77,6 @@ export class ApplianceController {
   }
 
   /**
-   * GET /api/appliances/:id/qrcodes
-   * Get appliance with QR codes only (optimized)
-   */
-  @Get(':id/qrcodes')
-  async getWithQrCodes(@Param('id') id: string) {
-    return this.applianceService.getApplianceWithQrCodes(id);
-  }
-
-  /**
    * GET /api/appliances/:id/stats
    * Get appliance statistics (dashboard)
    */

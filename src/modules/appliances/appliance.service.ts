@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { ApplianceEntity } from '../../entities/appliance.entity.js';
 import { CacheService } from '../../common/cache.service.js';
+import { QrCodeService } from '../qr/qr-code.service.js';
 import { v4 as uuidv4 } from 'uuid';
 
 type DashboardAppliance = ApplianceEntity & Partial<{
@@ -21,6 +22,7 @@ export class ApplianceService {
     @InjectRepository(ApplianceEntity)
     private applianceRepository: Repository<ApplianceEntity>,
     private cacheService: CacheService,
+    private qrCodeService: QrCodeService,
   ) {}
 
   /**
@@ -35,9 +37,9 @@ export class ApplianceService {
       return cached;
     }
 
-    // Single query with all relations loaded (no N+1 problem)
+    // Single query with all relations loaded (no N+1 problem, excluding deleted)
     const appliance = await this.applianceRepository.findOne({
-      where: { id: applianceId },
+      where: { id: applianceId, deleted_at: IsNull() },
       relations: [
         'business',
         'qr_codes',
@@ -79,9 +81,9 @@ export class ApplianceService {
     limit: number;
     offset: number;
   }> {
-    // Batch load all appliances with counts in one query
+    // Batch load all appliances with counts in one query (excluding deleted)
     const [appliances, total] = await this.applianceRepository.findAndCount({
-      where: { business_id: businessId },
+      where: { business_id: businessId, deleted_at: IsNull() },
       relations: ['documents', 'claims', 'qr_codes'],
       order: { created_at: 'DESC' },
       take: limit,
@@ -112,7 +114,7 @@ export class ApplianceService {
     }
 
     const appliance = await this.applianceRepository.findOne({
-      where: { id: applianceId },
+      where: { id: applianceId, deleted_at: IsNull() },
       relations: ['documents'],
       select: ['id', 'name', 'model', 'status'],
     });
@@ -136,8 +138,8 @@ export class ApplianceService {
     }
 
     const appliance = await this.applianceRepository.findOne({
-      where: { id: applianceId },
-      relations: ['claims', 'claims.warranty_registration'],
+      where: { id: applianceId, deleted_at: IsNull() },
+      relations: ['claims', 'claims.warranty'],
       select: ['id', 'name', 'model', 'status'],
     });
 
@@ -160,33 +162,9 @@ export class ApplianceService {
     }
 
     const appliance = await this.applianceRepository.findOne({
-      where: { id: applianceId },
+      where: { id: applianceId, deleted_at: IsNull() },
       relations: ['bookings'],
       select: ['id', 'name', 'model', 'status'],
-    });
-
-    if (appliance) {
-      await this.cacheService.set(cacheKey, appliance, 3600);
-    }
-
-    return appliance;
-  }
-
-  /**
-   * Get appliance QR codes (optimized for QR code view)
-   */
-  async getApplianceWithQrCodes(applianceId: string) {
-    const cacheKey = CacheService.keys.applianceQrCodes(applianceId);
-    const cached = await this.cacheService.get(cacheKey);
-
-    if (cached) {
-      return cached;
-    }
-
-    const appliance = await this.applianceRepository.findOne({
-      where: { id: applianceId },
-      relations: ['qr_codes'],
-      select: ['id', 'name', 'model'],
     });
 
     if (appliance) {
@@ -211,6 +189,10 @@ export class ApplianceService {
     // Invalidate business appliances list cache
     await this.cacheService.invalidateApplianceCaches(result.id, businessId);
 
+    if (result.model?.trim()) {
+      await this.qrCodeService.generateForAppliance(result.id);
+    }
+
     return result;
   }
 
@@ -227,84 +209,43 @@ export class ApplianceService {
   }
 
   /**
-   * Delete appliance (cascade deletes related data)
+   * Delete appliance (soft delete - marks as deleted)
    */
   async delete(applianceId: string, businessId?: string) {
-    console.log(`[DELETE] Starting delete for appliance: ${applianceId}`);
+    console.log(`[DELETE] Starting soft delete for appliance: ${applianceId}`);
 
     try {
-      // Verify appliance exists
+      // Verify appliance exists and is not already deleted
       const appliance = await this.applianceRepository.findOne({
-        where: { id: applianceId },
+        where: { id: applianceId, deleted_at: IsNull() },
       });
 
       if (!appliance) {
-        console.log(`[DELETE] Appliance not found`);
+        console.log(`[DELETE] Appliance not found or already deleted`);
         return {
-          message: 'Appliance not found',
+          message: 'Appliance not found or already deleted',
           success: false,
         };
       }
 
       const actualBusinessId = businessId || appliance.business_id;
-      console.log(`[DELETE] Found appliance, business_id: ${actualBusinessId}`);
+      console.log(`[DELETE] Found appliance, marking as deleted, business_id: ${actualBusinessId}`);
 
-      // Disable foreign key checks temporarily
-      await this.applianceRepository.query(`SET FOREIGN_KEY_CHECKS=0`);
-      console.log(`[DELETE] Disabled FOREIGN_KEY_CHECKS`);
+      // Soft delete: set deleted_at timestamp
+      await this.applianceRepository.update(applianceId, {
+        deleted_at: new Date(),
+      });
+      console.log(`[DELETE] Marked appliance as deleted`);
 
-      try {
-        // Delete all child records
-        const childTables = [
-          'documents',
-          'claims',
-          'bookings',
-          'qr_codes',
-          'chat_sessions',
-          'offers',
-          'warranty_registrations',
-          'activities',
-        ];
+      // Invalidate caches
+      await this.cacheService.invalidateApplianceCaches(applianceId, actualBusinessId);
+      console.log(`[DELETE] Invalidated caches`);
 
-        for (const table of childTables) {
-          await this.applianceRepository.query(
-            `DELETE FROM ${table} WHERE appliance_id = ?`,
-            [applianceId]
-          );
-          console.log(`[DELETE] Deleted from ${table}`);
-        }
-
-        // Delete the appliance itself
-        await this.applianceRepository.query(
-          `DELETE FROM appliances WHERE id = ?`,
-          [applianceId]
-        );
-        console.log(`[DELETE] Deleted from appliances`);
-
-        // Re-enable foreign key checks
-        await this.applianceRepository.query(`SET FOREIGN_KEY_CHECKS=1`);
-        console.log(`[DELETE] Re-enabled FOREIGN_KEY_CHECKS`);
-
-        // Verify deletion
-        const exists = await this.applianceRepository.findOne({
-          where: { id: applianceId },
-        });
-        const success = !exists;
-        console.log(`[DELETE] Verification - appliance exists: ${!!exists}, success: ${success}`);
-
-        // Invalidate caches
-        await this.cacheService.invalidateApplianceCaches(applianceId, actualBusinessId);
-
-        return {
-          message: 'Appliance deleted successfully',
-          success,
-          appliance_id: applianceId,
-        };
-      } catch (error) {
-        // Re-enable foreign key checks on error
-        await this.applianceRepository.query(`SET FOREIGN_KEY_CHECKS=1`);
-        throw error;
-      }
+      return {
+        message: 'Appliance deleted successfully',
+        success: true,
+        appliance_id: applianceId,
+      };
     } catch (error) {
       console.error(`[DELETE] Fatal error:`, error);
       return {
@@ -319,9 +260,9 @@ export class ApplianceService {
    * Get appliance statistics (for dashboard)
    */
   async getApplianceStats(applianceId: string) {
-    // Batch query all stats in one go
+    // Batch query all stats in one go (excluding deleted)
     const appliance = await this.applianceRepository.findOne({
-      where: { id: applianceId },
+      where: { id: applianceId, deleted_at: IsNull() },
       relations: [
         'documents',
         'claims',

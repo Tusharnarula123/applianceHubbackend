@@ -40,6 +40,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: root123
       MYSQL_DATABASE: appliancehub
+      MYSQL_USER: appliance
+      MYSQL_PASSWORD: appPassword123
       TZ: UTC
 
   redis:

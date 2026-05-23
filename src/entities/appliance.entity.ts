@@ -53,6 +53,9 @@ export class ApplianceEntity {
   @CreateDateColumn()
   created_at: Date;
 
+  @Column('datetime', { nullable: true })
+  deleted_at: Date | null = null;
+
   // Relations
   @ManyToOne((business: any) => BusinessEntity, (business: any) => business.appliances, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'business_id' })

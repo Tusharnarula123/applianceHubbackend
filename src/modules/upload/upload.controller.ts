@@ -3,11 +3,11 @@ import {
   Post,
   Delete,
   Param,
+  Query,
   UseInterceptors,
   UploadedFile,
   BadRequestException,
   UseGuards,
-  Body,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -17,14 +17,21 @@ import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagg
 import { UploadService } from './upload.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 
+const MAX_DOCUMENT_BYTES = 100 * 1024 * 1024; // 100MB
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20MB
+
 @ApiTags('Upload')
-@Controller('upload')
+@Controller(['api/upload', 'upload'])
 export class UploadController {
   constructor(private uploadService: UploadService) {}
 
   @Post('document/:applianceId')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: MAX_DOCUMENT_BYTES },
+    }),
+  )
   @ApiBearerAuth()
   @ApiConsumes('multipart/form-data')
   @HttpCode(HttpStatus.CREATED)
@@ -32,16 +39,21 @@ export class UploadController {
   async uploadDocument(
     @UploadedFile() file: MulterFile,
     @Param('applianceId') applianceId: string,
+    @Query('document_type') documentType?: string,
   ) {
     if (!file) {
       throw new BadRequestException('No file provided');
     }
-    return this.uploadService.uploadDocument(file, applianceId);
+    return this.uploadService.uploadDocument(file, applianceId, documentType);
   }
 
   @Post('image')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: MAX_IMAGE_BYTES },
+    }),
+  )
   @ApiBearerAuth()
   @ApiConsumes('multipart/form-data')
   @HttpCode(HttpStatus.CREATED)

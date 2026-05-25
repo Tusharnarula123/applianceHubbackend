@@ -1,14 +1,19 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import type { File as MulterFile } from 'multer';
+import { RagService } from '../chat/rag.service.js';
+import { CacheService } from '../../common/cache.service.js';
+import { ActivityService } from '../activities/activity.service.js';
 import {
   DocumentEntity,
   DOCUMENT_FILE_TYPES,
   type DocumentFileType,
 } from '../../entities/document.entity.js';
+import { ApplianceEntity } from '../../entities/appliance.entity.js';
+import { getUploadsDir, resolveDocumentFilePath } from '../../common/uploads-path.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const DOCUMENT_TYPE_ALIASES: Record<string, DocumentFileType> = {
@@ -28,7 +33,8 @@ const DOCUMENT_TYPE_ALIASES: Record<string, DocumentFileType> = {
 
 @Injectable()
 export class UploadService {
-  private readonly uploadDir = './uploads';
+  private readonly logger = new Logger(UploadService.name);
+  private readonly uploadDir = getUploadsDir();
   private readonly maxFileSize = 100 * 1024 * 1024; // 100MB
   private readonly allowedMimeTypes = [
     'application/pdf',
@@ -42,6 +48,11 @@ export class UploadService {
   constructor(
     @InjectRepository(DocumentEntity)
     private documentRepository: Repository<DocumentEntity>,
+    @InjectRepository(ApplianceEntity)
+    private applianceRepository: Repository<ApplianceEntity>,
+    private ragService: RagService,
+    private cacheService: CacheService,
+    private activityService: ActivityService,
   ) {}
 
   resolveDocumentType(documentType?: string): DocumentFileType {
@@ -92,6 +103,10 @@ export class UploadService {
       throw new BadRequestException('Failed to save file');
     }
 
+    if (!(await fs.stat(filepath)).isFile()) {
+      throw new BadRequestException('Upload did not persist to disk — try again');
+    }
+
     // Create document record
     const document = this.documentRepository.create({
       id: fileId,
@@ -104,14 +119,77 @@ export class UploadService {
     });
 
     const savedDocument = await this.documentRepository.save(document);
+    await this.invalidateApplianceDocumentCaches(applianceId);
+    await this.activityService.logForAppliance(
+      applianceId,
+      'upload',
+      `Document uploaded: ${savedDocument.name}`,
+      { document_id: savedDocument.id, file_type: savedDocument.file_type },
+    );
+
+    if (file.mimetype === 'application/pdf') {
+      await this.documentRepository.update(savedDocument.id, {
+        embedding_status: 'processing',
+      });
+
+      // Auto-embed for Nest AI chat + Python chatbot (same document_chunks table)
+      this.scheduleEmbeddingForAppliance(savedDocument.id, applianceId);
+
+      return {
+        id: savedDocument.id,
+        name: savedDocument.name,
+        file_url: savedDocument.file_url,
+        file_size_bytes: savedDocument.file_size_bytes,
+        embedding_status: 'processing',
+        uploaded_at: savedDocument.created_at,
+        message:
+          'PDF uploaded. Embedding for the AI chatbot started automatically — poll GET /api/chat/ai/:applianceId/rag-status until ready_for_chat is true.',
+      };
+    }
+
+    await this.documentRepository.update(savedDocument.id, {
+      embedding_status: 'indexed',
+      indexed_at: new Date(),
+    });
 
     return {
       id: savedDocument.id,
       name: savedDocument.name,
       file_url: savedDocument.file_url,
       file_size_bytes: savedDocument.file_size_bytes,
+      embedding_status: 'indexed',
       uploaded_at: savedDocument.created_at,
     };
+  }
+
+  /**
+   * Index uploaded PDF + any other pending/failed PDFs for this appliance.
+   * Same pipeline as `npm run rag:reindex` — no separate script needed on upload.
+   */
+  private scheduleEmbeddingForAppliance(documentId: string, applianceId: string): void {
+    void (async () => {
+      try {
+        this.logger.log(
+          `Starting chatbot embedding for document ${documentId} (appliance ${applianceId})`,
+        );
+        await this.ragService.indexDocument(documentId);
+        const extra = await this.ragService.reindexApplianceDocuments(applianceId);
+        if (extra.indexed > 0) {
+          this.logger.log(
+            `Also embedded ${extra.indexed} other PDF(s) for appliance ${applianceId}`,
+          );
+        }
+        const status = await this.ragService.getIndexingStatus(applianceId);
+        this.logger.log(
+          `Chatbot RAG for ${applianceId}: ${status.chunks_with_embeddings} chunk(s), ready_for_chat=${status.ready_for_chat}`,
+        );
+      } catch (err) {
+        await this.documentRepository.update(documentId, { embedding_status: 'failed' });
+        this.logger.error(
+          `Chatbot embedding failed for ${documentId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    })();
   }
 
   async uploadImage(file: MulterFile) {
@@ -158,29 +236,61 @@ export class UploadService {
     };
   }
 
-  async deleteFile(fileId: string) {
+  /**
+   * Remove document row (MySQL), RAG chunks (CASCADE), and file on disk (./uploads).
+   */
+  async deleteFile(fileId: string, applianceId?: string) {
     const document = await this.documentRepository.findOne({
       where: { id: fileId },
     });
 
     if (!document) {
-      throw new BadRequestException('File not found');
+      throw new NotFoundException('File not found');
     }
 
-    // Delete physical file
+    if (applianceId && document.appliance_id !== applianceId) {
+      throw new BadRequestException('Document does not belong to this appliance');
+    }
+
+    const appliance = await this.applianceRepository.findOne({
+      where: { id: document.appliance_id },
+      select: ['id', 'business_id'],
+    });
+
+    // Delete physical file (metadata lives in SQL `documents` table)
     try {
-      const filename = path.basename(document.file_url);
-      const filepath = path.join(this.uploadDir, filename);
+      const filepath = resolveDocumentFilePath(document.file_url);
       await fs.unlink(filepath);
     } catch (error) {
-      console.error('Error deleting file:', error);
-      // Continue anyway, delete from DB
+      this.logger.warn(`Could not delete file on disk: ${error}`);
     }
 
-    // Delete document record
+    // Removes `documents` row; `document_chunks` CASCADE in DB
     await this.documentRepository.remove(document);
+    await this.invalidateApplianceDocumentCaches(document.appliance_id, appliance?.business_id);
 
-    return { message: 'File deleted successfully' };
+    this.logger.log(`Deleted document ${fileId} for appliance ${document.appliance_id}`);
+
+    return {
+      message: 'File deleted successfully',
+      id: fileId,
+      appliance_id: document.appliance_id,
+    };
+  }
+
+  private async invalidateApplianceDocumentCaches(
+    applianceId: string,
+    businessId?: string,
+  ): Promise<void> {
+    let bid = businessId;
+    if (!bid) {
+      const appliance = await this.applianceRepository.findOne({
+        where: { id: applianceId },
+        select: ['business_id'],
+      });
+      bid = appliance?.business_id;
+    }
+    await this.cacheService.invalidateApplianceCaches(applianceId, bid);
   }
 
   private validateFile(file: MulterFile) {

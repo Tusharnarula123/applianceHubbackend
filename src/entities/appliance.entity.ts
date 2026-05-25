@@ -47,6 +47,12 @@ export class ApplianceEntity {
   @Column('varchar', { length: 100, nullable: true, default: 'professional' })
   bot_tone: string;
 
+  @Column('text', { nullable: true })
+  description: string;
+
+  @Column('varchar', { length: 500, nullable: true })
+  image_url: string;
+
   @Column('int', { unsigned: true, default: 0 })
   scans_count: number;
 

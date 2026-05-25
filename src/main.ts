@@ -19,6 +19,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { json, urlencoded } from 'express';
 import { join } from 'path';
+import { getUploadsDir } from './common/uploads-path.js';
 
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100MB
 
@@ -30,7 +31,7 @@ async function bootstrap() {
 
   app.use(json({ limit: MAX_UPLOAD_BYTES }));
   app.use(urlencoded({ extended: true, limit: MAX_UPLOAD_BYTES }));
-  app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads/' });
+  app.useStaticAssets(getUploadsDir(), { prefix: '/uploads/' });
 
   // Configure Swagger/OpenAPI
   const config = new DocumentBuilder()

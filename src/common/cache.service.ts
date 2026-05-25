@@ -103,11 +103,38 @@ export class CacheService {
   /**
    * Invalidate claim-related caches
    */
-  async invalidateClaimCaches(claimId: string, applianceId: string): Promise<void> {
+  async invalidateClaimCaches(
+    claimId: string,
+    applianceId: string,
+    businessId?: string,
+  ): Promise<void> {
     const keys = [
       CacheService.keys.claim(claimId),
       CacheService.keys.applianceClaims(applianceId),
+      CacheService.keys.appliance(applianceId),
     ];
+
+    if (businessId) {
+      keys.push(CacheService.keys.appliancesList(businessId));
+    }
+
+    await this.deleteMany(keys);
+  }
+
+  async invalidateBookingCaches(
+    bookingId: string,
+    applianceId: string,
+    businessId?: string,
+  ): Promise<void> {
+    const keys = [
+      CacheService.keys.booking(bookingId),
+      CacheService.keys.applianceBookings(applianceId),
+      CacheService.keys.appliance(applianceId),
+    ];
+
+    if (businessId) {
+      keys.push(CacheService.keys.appliancesList(businessId));
+    }
 
     await this.deleteMany(keys);
   }

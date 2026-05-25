@@ -1,10 +1,15 @@
+import 'reflect-metadata';
 import { DataSource } from 'typeorm';
-import * as dotenv from 'dotenv';
-import { join } from 'path';
+import { config } from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-dotenv.config();
+config();
 
-export const AppDataSource = new DataSource({
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const AppDataSource = new DataSource({
   type: 'mysql',
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '3306', 10),
@@ -16,3 +21,5 @@ export const AppDataSource = new DataSource({
   synchronize: false,
   logging: true,
 });
+
+export default AppDataSource;

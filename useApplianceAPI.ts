@@ -286,9 +286,10 @@ export function useApplianceQrCodes(applianceId: string) {
     try {
       const result = await apiClient.getApplianceQrCodes(applianceId);
       const qrCodes = (result.qr_codes ?? []).map(
-        (qr: { id: string; image_url?: string; url: string; model: string; scan_count: number }) => ({
+        (qr: { id: string; image_url?: string; image_src?: string; url: string; model: string; scan_count: number }) => ({
           ...qr,
           image_url: apiClient.getQrImageSrc(qr),
+          image_src: apiClient.getQrImageSrc(qr),
         }),
       );
       setState({
@@ -426,6 +427,83 @@ export function usePDF() {
   };
 }
 
+/** RAG manuals + images for chatbot gallery */
+export function useChatKnowledgeMedia(applianceId: string) {
+  return useAPI(
+    () => apiClient.getChatKnowledgeMedia(applianceId),
+    !!applianceId,
+  );
+}
+
+/**
+ * AI chat with PDF RAG (use on /chat/[applianceId] — not legacy /api/chat/session).
+ */
+export function useAiChat(applianceId: string) {
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<
+    Array<{ role: 'user' | 'assistant'; content: string; meta?: Record<string, unknown> }>
+  >([]);
+  const [knowledgeMedia, setKnowledgeMedia] = useState<
+    Array<{ id: string; name: string; public_url: string; kind: string; in_rag: boolean }>
+  >([]);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const start = useCallback(async () => {
+    if (!applianceId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const session = await apiClient.startAiChatSession(applianceId);
+      setSessionId(session.session_id);
+      setKnowledgeMedia(session.knowledge_media ?? []);
+      setMessages([{ role: 'assistant', content: session.bot_welcome }]);
+    } catch (e) {
+      setError(e instanceof Error ? e : new Error('Chat start failed'));
+    } finally {
+      setLoading(false);
+    }
+  }, [applianceId]);
+
+  useEffect(() => {
+    start();
+  }, [start]);
+
+  const sendMessage = useCallback(
+    async (text: string) => {
+      if (!sessionId || !text.trim()) return;
+      setSending(true);
+      setMessages((m) => [...m, { role: 'user', content: text.trim() }]);
+      try {
+        const reply = await apiClient.sendAiChatMessage(sessionId, text.trim());
+        if (reply.knowledge_media) setKnowledgeMedia(reply.knowledge_media);
+        setMessages((m) => [
+          ...m,
+          { role: 'assistant', content: reply.content, meta: reply },
+        ]);
+      } catch (e) {
+        setError(e instanceof Error ? e : new Error('Send failed'));
+        throw e;
+      } finally {
+        setSending(false);
+      }
+    },
+    [sessionId],
+  );
+
+  return {
+    sessionId,
+    messages,
+    knowledgeMedia,
+    loading,
+    sending,
+    error,
+    sendMessage,
+    restart: start,
+  };
+}
+
 export default {
   useAPI,
   useDashboard,
@@ -435,4 +513,6 @@ export default {
   useApplianceQrCodes,
   useFileUpload,
   usePDF,
+  useChatKnowledgeMedia,
+  useAiChat,
 };

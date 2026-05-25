@@ -45,6 +45,10 @@ export class ChatController {
     return this.chatService.createSession(data.appliance_id, data);
   }
 
+  /**
+   * Stores a message only — does NOT call OpenAI or search uploaded PDFs.
+   * For AI replies grounded in manuals use POST /api/chat/ai/session/:sessionId/message
+   */
   @Post('session/:sessionId/message')
   @HttpCode(HttpStatus.CREATED)
   async addMessage(

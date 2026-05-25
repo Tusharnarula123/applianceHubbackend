@@ -17,9 +17,9 @@ import { ClaimEntity } from '../../entities/claim.entity.js';
 export class ClaimController {
   constructor(private claimService: ClaimService) {}
 
-  @Get(':id')
-  async getById(@Param('id') id: string) {
-    return this.claimService.getClaimById(id);
+  @Get('appliance/:applianceId/status/:status')
+  async getByStatus(@Param('applianceId') applianceId: string, @Param('status') status: string) {
+    return this.claimService.getClaimsByStatus(applianceId, status);
   }
 
   @Get('appliance/:applianceId')
@@ -27,9 +27,9 @@ export class ClaimController {
     return this.claimService.getClaimsByAppliance(applianceId);
   }
 
-  @Get('appliance/:applianceId/status/:status')
-  async getByStatus(@Param('applianceId') applianceId: string, @Param('status') status: string) {
-    return this.claimService.getClaimsByStatus(applianceId, status);
+  @Get(':id')
+  async getById(@Param('id') id: string) {
+    return this.claimService.getClaimById(id);
   }
 
   @Post()

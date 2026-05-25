@@ -221,9 +221,22 @@ class ApplianceHubAPIClient {
     return this.request(`/api/appliances/${applianceId}/claims`, 'GET');
   }
 
-  /** Fetches QR codes; backend auto-generates if missing and appliance has a model */
+  /**
+   * Fetches QR codes; backend auto-generates if missing when appliance has a model.
+   * Call once per page — do not also rely on getAppliance().qr_codes for the image.
+   * Use qr.image_src in <img src> (same-origin PNG). Response: { qr_codes, qr_code, data }.
+   */
   async getApplianceQrCodes(applianceId: string) {
     return this.request(`/api/appliances/${applianceId}/qrcodes`, 'GET');
+  }
+
+  /** Normalize GET /qrcodes body for UI code that expects qr_codes[0] */
+  pickPrimaryQrCode(payload: {
+    qr_codes?: Array<Record<string, unknown>>;
+    qr_code?: Record<string, unknown> | null;
+    data?: Array<Record<string, unknown>>;
+  }) {
+    return payload.qr_code ?? payload.qr_codes?.[0] ?? payload.data?.[0] ?? null;
   }
 
   async generateApplianceQrCode(applianceId: string, size = '150x150') {
@@ -238,9 +251,17 @@ class ApplianceHubAPIClient {
     return this.request(`/api/qr-codes/${qrCodeId}/scan`, 'POST');
   }
 
-  /** Use for <img src> — reads image_url from API */
+  /**
+   * Use for <img src>. Prefer same-origin PNG URL (works with Next/Image).
+   * Do not use `url` / `link` / `data` — those are the scan landing page, not the image.
+   */
   getQrImageSrc(qr: { id: string; image_url?: string; image_src?: string }): string {
-    return qr.image_url ?? qr.image_src ?? `${this.baseURL}/api/qr-codes/${qr.id}/image`;
+    const proxy = `${this.baseURL}/api/qr-codes/${qr.id}/image`;
+    const src = qr.image_src ?? qr.image_url;
+    if (!src) return proxy;
+    if (src.startsWith('data:image/')) return src;
+    if (src.includes('/api/qr-codes/')) return src;
+    return proxy;
   }
 
   async createAppliance(businessId: string, data: any) {
@@ -271,11 +292,95 @@ class ApplianceHubAPIClient {
     return this.request(`/api/dashboard/recent-activity/${businessId}?limit=${limit}`, 'GET');
   }
 
+  /** Activity feed stats (by_type.claim, scan, etc.) — separate from claims_count on appliance details */
+  async getActivityStats(businessId: string, days = 30) {
+    return this.request(
+      `/api/activities/business/${businessId}/stats?days=${days}`,
+      'GET',
+    );
+  }
+
   async uploadDocument(applianceId: string, file: File, documentType = 'document') {
     return this.uploadFile(
-      `/api/upload/document/${applianceId}?document_type=${documentType}`,
+      `/api/appliances/${applianceId}/documents?document_type=${encodeURIComponent(documentType)}`,
       file,
     );
+  }
+
+  /** Poll until embeddings exist in document_chunks (chatbot-ready), or timeout. */
+  async waitForRagIndexing(
+    applianceId: string,
+    options: { intervalMs?: number; maxAttempts?: number } = {},
+  ): Promise<{
+    indexed: number;
+    total: number;
+    failed: number;
+    chunks_with_embeddings: number;
+    ready_for_chat: boolean;
+  }> {
+    const intervalMs = options.intervalMs ?? 3000;
+    const maxAttempts = options.maxAttempts ?? 40;
+    for (let i = 0; i < maxAttempts; i++) {
+      const status = await this.getRagStatus(applianceId);
+      if (status.ready_for_chat) {
+        return {
+          indexed: status.indexed,
+          total: status.total,
+          failed: status.failed,
+          chunks_with_embeddings: status.chunks_with_embeddings,
+          ready_for_chat: true,
+        };
+      }
+      const settled =
+        status.processing === 0 &&
+        status.pending === 0 &&
+        status.total > 0 &&
+        status.chunks_with_embeddings === 0;
+      if (settled) break;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    const last = await this.getRagStatus(applianceId);
+    return {
+      indexed: last.indexed,
+      total: last.total,
+      failed: last.failed,
+      chunks_with_embeddings: last.chunks_with_embeddings ?? 0,
+      ready_for_chat: !!last.ready_for_chat,
+    };
+  }
+
+  async getRagStatus(applianceId: string) {
+    return this.request(`/api/chat/ai/${applianceId}/rag-status`, 'GET');
+  }
+
+  /** PDFs in RAG + images with public_url — for chatbot gallery */
+  async getChatKnowledgeMedia(applianceId: string) {
+    return this.request(`/api/chat/ai/${applianceId}/knowledge-media`, 'GET');
+  }
+
+  async reindexApplianceDocuments(applianceId: string) {
+    return this.request(`/api/chat/ai/${applianceId}/reindex`, 'POST');
+  }
+
+  async startAiChatSession(
+    applianceId: string,
+    customer?: { customer_name?: string; customer_email?: string },
+  ) {
+    return this.request('/api/chat/ai/session', 'POST', {
+      appliance_id: applianceId,
+      ...customer,
+    });
+  }
+
+  async sendAiChatMessage(
+    sessionId: string,
+    message: string,
+    customer?: { customer_name?: string; customer_email?: string },
+  ) {
+    return this.request(`/api/chat/ai/session/${sessionId}/message`, 'POST', {
+      message,
+      ...customer,
+    });
   }
 
   async uploadImage(file: File) {
@@ -284,6 +389,13 @@ class ApplianceHubAPIClient {
 
   async deleteFile(fileId: string) {
     return this.request(`/api/upload/${fileId}`, 'DELETE');
+  }
+
+  async deleteApplianceDocument(applianceId: string, documentId: string) {
+    return this.request(
+      `/api/appliances/${applianceId}/documents/${documentId}`,
+      'DELETE',
+    );
   }
 
   async generateWarrantyPDF(warrantyId: string) {

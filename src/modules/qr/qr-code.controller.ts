@@ -31,10 +31,23 @@ export class QrCodeController {
   }
 
   @Get('appliances/:applianceId/qrcodes')
-  @ApiOperation({ summary: 'List QR codes for an appliance' })
+  @ApiOperation({
+    summary:
+      'List QR codes for an appliance (use image_src in <img>; add ?embed=1 only if you need base64 in JSON)',
+  })
   @ApiParam({ name: 'applianceId', description: 'Appliance ID (UUID)' })
-  async listByAppliance(@Param('applianceId') applianceId: string) {
-    return this.qrCodeService.getQrCodesForAppliance(applianceId);
+  @ApiQuery({
+    name: 'embed',
+    required: false,
+    description: 'If 1, embed PNG as base64 in JSON (slow). Default: same-origin image URL only.',
+  })
+  async listByAppliance(
+    @Param('applianceId') applianceId: string,
+    @Query('embed') embed?: string,
+  ) {
+    return this.qrCodeService.getQrCodesForAppliance(applianceId, {
+      embedImages: embed === '1' || embed === 'true',
+    });
   }
 
   @Get('qr-codes/lookup')

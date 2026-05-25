@@ -9,15 +9,28 @@ import {
   Query,
   HttpCode,
   HttpStatus,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { File as MulterFile } from 'multer';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
 import { ApplianceService } from './appliance.service.js';
 import { ApplianceEntity } from '../../entities/appliance.entity.js';
+import { UploadService } from '../upload/upload.service.js';
+import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
+
+const MAX_DOCUMENT_BYTES = 100 * 1024 * 1024;
 
 @ApiTags('Appliances')
 @Controller('api/appliances')
 export class ApplianceController {
-  constructor(private applianceService: ApplianceService) {}
+  constructor(
+    private applianceService: ApplianceService,
+    private uploadService: UploadService,
+  ) {}
 
   /**
    * GET /api/appliances/business/:businessId
@@ -56,6 +69,49 @@ export class ApplianceController {
   @Get(':id/documents')
   async getWithDocuments(@Param('id') id: string) {
     return this.applianceService.getApplianceWithDocuments(id);
+  }
+
+  /**
+   * POST /api/appliances/:id/documents
+   * Upload document (PDF) for an appliance — same as POST /api/upload/document/:id
+   */
+  @Post(':id/documents')
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: MAX_DOCUMENT_BYTES },
+    }),
+  )
+  @ApiBearerAuth()
+  @ApiConsumes('multipart/form-data')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Upload document for an appliance' })
+  @ApiParam({ name: 'id', description: 'Appliance ID (UUID)' })
+  @ApiQuery({ name: 'document_type', required: false, example: 'Manual' })
+  async uploadDocument(
+    @Param('id') id: string,
+    @UploadedFile() file: MulterFile,
+    @Query('document_type') documentType?: string,
+  ) {
+    if (!file) {
+      throw new BadRequestException('No file provided');
+    }
+    return this.uploadService.uploadDocument(file, id, documentType);
+  }
+
+  /**
+   * DELETE /api/appliances/:id/documents/:documentId
+   */
+  @Delete(':id/documents/:documentId')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete appliance document' })
+  async deleteDocument(
+    @Param('id') applianceId: string,
+    @Param('documentId') documentId: string,
+  ) {
+    return this.uploadService.deleteFile(documentId, applianceId);
   }
 
   /**

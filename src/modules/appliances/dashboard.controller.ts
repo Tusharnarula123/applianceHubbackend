@@ -1,6 +1,7 @@
 import { Controller, Get, Param, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { ApplianceService } from './appliance.service.js';
+import { ActivityService } from '../activities/activity.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 
 @ApiTags('Dashboard')
@@ -8,7 +9,10 @@ import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class DashboardController {
-  constructor(private applianceService: ApplianceService) {}
+  constructor(
+    private applianceService: ApplianceService,
+    private activityService: ActivityService,
+  ) {}
 
   /**
    * GET /api/dashboard/stats/:businessId
@@ -66,12 +70,11 @@ export class DashboardController {
   @ApiParam({ name: 'businessId', description: 'Business ID' })
   @ApiQuery({ name: 'limit', required: false, example: 50 })
   async getRecentActivity(@Param('businessId') businessId: string, @Query('limit') limit: number = 50) {
-    // This would typically fetch recent activities from Activity service
-    // For now, returning a structure that can be populated
+    const result = await this.activityService.getActivitiesByBusiness(businessId, limit, 0);
     return {
       business_id: businessId,
-      activities: [],
-      total: 0,
+      activities: result.data,
+      total: result.total,
     };
   }
 

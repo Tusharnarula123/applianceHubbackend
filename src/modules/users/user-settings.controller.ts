@@ -16,48 +16,51 @@ import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class UserSettingsController {
-  /**
-   * GET /api/users/:userId/notification-settings
-   * Get user notification settings
-   */
-  @Get('notification-settings')
-  @ApiOperation({ summary: 'Get user notification settings' })
-  @ApiParam({ name: 'userId', description: 'User ID' })
-  async getNotificationSettings(@Param('userId') userId: string) {
+  private defaultNotificationSettings() {
     return {
-      data: {
-        n1: true, // New warranty claim filed
-        n2: true, // Claim resolved by AI
-        n3: true, // Claim escalated to human
-        n4: true, // AI training complete
-        n5: false, // New PDF uploaded
-        n6: true, // Weekly digest email
-        n7: true, // Billing & plan changes
-      },
+      n1: true,
+      n2: true,
+      n3: true,
+      n4: true,
+      n5: false,
+      n6: true,
+      n7: true,
     };
   }
 
-  /**
-   * PUT /api/users/:userId/notification-settings
-   * Update user notification settings
-   */
+  @Get('settings/notifications')
+  @ApiOperation({ summary: 'Get user notification settings (frontend path)' })
+  @ApiParam({ name: 'userId', description: 'User ID' })
+  getNotificationSettingsFrontend(@Param('userId') userId: string) {
+    return this.getNotificationSettings(userId);
+  }
+
+  @Get('notification-settings')
+  @ApiOperation({ summary: 'Get user notification settings' })
+  @ApiParam({ name: 'userId', description: 'User ID' })
+  getNotificationSettings(@Param('userId') _userId: string) {
+    return { data: this.defaultNotificationSettings() };
+  }
+
+  @Put('settings/notifications')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update user notification settings (frontend path)' })
+  @ApiParam({ name: 'userId', description: 'User ID' })
+  updateNotificationSettingsFrontend(
+    @Param('userId') userId: string,
+    @Body() data: NotificationSettingsBody,
+  ) {
+    return this.updateNotificationSettings(userId, data);
+  }
+
   @Put('notification-settings')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Update user notification settings' })
   @ApiParam({ name: 'userId', description: 'User ID' })
-  async updateNotificationSettings(
-    @Param('userId') userId: string,
-    @Body() data: {
-      n1?: boolean;
-      n2?: boolean;
-      n3?: boolean;
-      n4?: boolean;
-      n5?: boolean;
-      n6?: boolean;
-      n7?: boolean;
-    },
+  updateNotificationSettings(
+    @Param('userId') _userId: string,
+    @Body() data: NotificationSettingsBody,
   ) {
-    // Store in database with userId as key
     return {
       data: {
         n1: data.n1 ?? true,
@@ -72,3 +75,13 @@ export class UserSettingsController {
     };
   }
 }
+
+type NotificationSettingsBody = {
+  n1?: boolean;
+  n2?: boolean;
+  n3?: boolean;
+  n4?: boolean;
+  n5?: boolean;
+  n6?: boolean;
+  n7?: boolean;
+};

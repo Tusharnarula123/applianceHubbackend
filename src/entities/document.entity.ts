@@ -37,6 +37,12 @@ export class DocumentEntity {
   @Column('varchar', { length: 100, nullable: true })
   mime_type: string;
 
+  @Column('enum', {
+    enum: ['pending', 'processing', 'indexed', 'failed'],
+    default: 'pending',
+  })
+  embedding_status: 'pending' | 'processing' | 'indexed' | 'failed';
+
   @Column('timestamp', { nullable: true })
   indexed_at: Date;
 

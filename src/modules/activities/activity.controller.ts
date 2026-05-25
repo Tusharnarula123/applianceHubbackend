@@ -8,7 +8,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ActivityService } from './activity.service.js';
+import { ActivityService, type ActivityType } from './activity.service.js';
 
 @Controller('api/activities')
 export class ActivityController {
@@ -21,6 +21,14 @@ export class ActivityController {
     @Query('offset') offset: number = 0,
   ) {
     return this.activityService.getActivitiesByBusiness(businessId, limit, offset);
+  }
+
+  @Get('appliance/:applianceId/stats')
+  async getApplianceStats(
+    @Param('applianceId') applianceId: string,
+    @Query('days') days: number = 30,
+  ) {
+    return this.activityService.getApplianceDashboardStats(applianceId, days);
   }
 
   @Get('appliance/:applianceId')
@@ -58,7 +66,7 @@ export class ActivityController {
   ) {
     return this.activityService.log(
       data.business_id,
-      data.type,
+      data.type as ActivityType,
       data.text,
       data.appliance_id,
       data.metadata,

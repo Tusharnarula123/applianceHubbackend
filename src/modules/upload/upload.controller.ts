@@ -70,7 +70,10 @@ export class UploadController {
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete uploaded file' })
-  async deleteFile(@Param('fileId') fileId: string) {
-    return this.uploadService.deleteFile(fileId);
+  async deleteFile(
+    @Param('fileId') fileId: string,
+    @Query('applianceId') applianceId?: string,
+  ) {
+    return this.uploadService.deleteFile(fileId, applianceId);
   }
 }

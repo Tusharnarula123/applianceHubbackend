@@ -6,9 +6,11 @@ import { DashboardController } from './dashboard.controller.js';
 import { ApplianceService } from './appliance.service.js';
 import { CacheService } from '../../common/cache.service.js';
 import { QrCodeModule } from '../qr/qr-code.module.js';
+import { UploadModule } from '../upload/upload.module.js';
+import { ActivityModule } from '../activities/activity.module.js';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([ApplianceEntity]), QrCodeModule],
+  imports: [TypeOrmModule.forFeature([ApplianceEntity]), QrCodeModule, UploadModule, ActivityModule],
   controllers: [ApplianceController, DashboardController],
   providers: [ApplianceService, CacheService],
   exports: [ApplianceService],

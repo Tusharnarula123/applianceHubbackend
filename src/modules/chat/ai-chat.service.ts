@@ -195,6 +195,30 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'generate_image',
+      description:
+        'Generate an AI image using DALL-E 3 when the user asks to see something, wants a visual, or requests an image (e.g. "show me what the part looks like", "generate a diagram", "create an image of…"). Always enrich the prompt with the appliance name, model, and category for relevant results.',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: {
+            type: 'string',
+            description:
+              'Detailed image description. Include appliance-specific context (name, model, category, colours) to make the image relevant.',
+          },
+          size: {
+            type: 'string',
+            enum: ['1024x1024', '1792x1024', '1024x1792'],
+            description: 'Image dimensions. Default: 1024x1024 (square). Use 1792x1024 for wide/landscape.',
+          },
+        },
+        required: ['prompt'],
+      },
+    },
+  },
 ];
 
 // ─── Service ───────────────────────────────────────────────────────────────
@@ -384,7 +408,7 @@ export class AiChatService {
     ];
 
     // 6. Run the tool-calling loop
-    const { finalContent, toolCallsMade, pdfUrls } = await this.runToolLoop(
+    const { finalContent, toolCallsMade, pdfUrls, imageUrls } = await this.runToolLoop(
       openaiMessages,
       appliance,
       customerContext,
@@ -408,6 +432,7 @@ export class AiChatService {
       content: finalContent,
       tool_calls_made: toolCallsMade,
       pdf_urls: pdfUrls,
+      image_urls: imageUrls,
       rag_used: rag.chunkCount > 0,
       rag_chunks: rag.chunkCount,
       /** PDFs used for this answer + related images to render under the message */
@@ -460,6 +485,7 @@ CAPABILITIES — you help customers with:
 • Filing and tracking service claims
 • Scheduling and managing service bookings
 • General product information, appliance details, and troubleshooting
+• Generating images (diagrams, part visuals, illustrations) when asked — use generate_image tool
 
 TOOL USE GUIDELINES:
 - Always call the relevant tool before answering questions about real data. Never invent IDs.
@@ -476,9 +502,10 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
     messages: OpenAI.Chat.ChatCompletionMessageParam[],
     appliance: ApplianceEntity,
     customerContext?: { customer_name?: string; customer_email?: string },
-  ): Promise<{ finalContent: string; toolCallsMade: string[]; pdfUrls: Record<string, string> }> {
+  ): Promise<{ finalContent: string; toolCallsMade: string[]; pdfUrls: Record<string, string>; imageUrls: Record<string, string> }> {
     const toolCallsMade: string[] = [];
     const pdfUrls: Record<string, string> = {};
+    const imageUrls: Record<string, string> = {};
     const MAX_ROUNDS = 8; // prevent infinite loops
     let round = 0;
 
@@ -505,6 +532,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
           finalContent: assistantMsg.content ?? 'I apologize, I was unable to generate a response.',
           toolCallsMade,
           pdfUrls,
+          imageUrls,
         };
       }
 
@@ -524,7 +552,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
         toolCallsMade.push(fnName);
         this.logger.log(`Tool call: ${fnName}(${JSON.stringify(args)})`);
 
-        const result = await this.executeTool(fnName, args, appliance, customerContext, pdfUrls);
+        const result = await this.executeTool(fnName, args, appliance, customerContext, pdfUrls, imageUrls);
 
         currentMessages.push({
           role: 'tool',
@@ -539,6 +567,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
       finalContent: 'I was unable to complete your request after multiple attempts. Please try again.',
       toolCallsMade,
       pdfUrls,
+      imageUrls,
     };
   }
 
@@ -549,6 +578,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
     appliance: ApplianceEntity,
     customerContext?: { customer_name?: string; customer_email?: string },
     pdfUrls?: Record<string, string>,
+    imageUrls?: Record<string, string>,
   ): Promise<unknown> {
     const applianceId = appliance.id;
     const baseUrl = this.configService.get<string>('APP_BASE_URL') ?? 'http://localhost:3001';
@@ -732,6 +762,39 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
         const url = `${baseUrl}/pdf/booking/${args.booking_id}`;
         if (pdfUrls) pdfUrls[`booking_${args.booking_id}`] = url;
         return { pdf_url: url, description: 'Booking confirmation PDF' };
+      }
+
+      // ── Image Generation ──────────────────────────────────────
+      case 'generate_image': {
+        if (!args.prompt) {
+          return { error: 'prompt is required for image generation' };
+        }
+        const enrichedPrompt = `${args.prompt} — for a ${appliance.category} called "${appliance.name}"${appliance.model ? ` (model ${appliance.model})` : ''}. Product illustration, clean white background, professional quality.`;
+        const size: '1024x1024' | '1792x1024' | '1024x1792' = (args.size as any) ?? '1024x1024';
+        try {
+          this.logger.log(`Generating image: "${enrichedPrompt.slice(0, 80)}…"`);
+          const imageResponse = await this.openai.images.generate({
+            model: 'dall-e-3',
+            prompt: enrichedPrompt,
+            size,
+            quality: 'standard',
+            n: 1,
+          });
+          const imageUrl = imageResponse.data?.[0]?.url;
+          if (!imageUrl) return { error: 'Image generation returned no URL — try again.' };
+          const key = `generated_image_${Date.now()}`;
+          if (imageUrls) imageUrls[key] = imageUrl;
+          return {
+            success: true,
+            image_url: imageUrl,
+            revised_prompt: imageResponse.data?.[0]?.revised_prompt,
+            key,
+            message: 'Image generated successfully.',
+          };
+        } catch (err: any) {
+          this.logger.error(`Image generation failed: ${err?.message ?? err}`);
+          return { error: `Image generation failed: ${err?.message ?? 'unknown error'}` };
+        }
       }
 
       default:

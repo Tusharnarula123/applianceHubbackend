@@ -19,7 +19,7 @@ done
 
 if [ "$DB_RESET" = "true" ]; then
   echo "==> DB_RESET=true — dropping all tables for clean TypeORM sync..."
-  node scripts/drop-all-tables.js
+  node scripts/drop-all-tables.cjs
 fi
 
 if [ "$DB_SYNC" = "true" ]; then

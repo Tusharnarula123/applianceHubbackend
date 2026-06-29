@@ -217,8 +217,20 @@ class ApplianceHubAPIClient {
     return this.request(`/api/appliances/${applianceId}/documents`, 'GET');
   }
 
+  /**
+   * Claim history for one appliance. Response: { appliance_id, claims[], total }.
+   * Includes claims filed via chatbot.
+   */
   async getApplianceClaims(applianceId: string) {
     return this.request(`/api/appliances/${applianceId}/claims`, 'GET');
+  }
+
+  /** Claim history across all appliances for dashboard */
+  async getDashboardClaimHistory(businessId: string, limit = 50, offset = 0) {
+    return this.request(
+      `/api/dashboard/claims/${businessId}?limit=${limit}&offset=${offset}`,
+      'GET',
+    );
   }
 
   /**
@@ -290,6 +302,11 @@ class ApplianceHubAPIClient {
 
   async getRecentActivity(businessId: string, limit = 50) {
     return this.request(`/api/dashboard/recent-activity/${businessId}?limit=${limit}`, 'GET');
+  }
+
+  /** Re-index PDFs with page-based chunks (after upgrading RAG structure) */
+  async reindexApplianceRag(applianceId: string) {
+    return this.request(`/api/chat/ai/${applianceId}/reindex`, 'POST');
   }
 
   /** Activity feed stats (by_type.claim, scan, etc.) — separate from claims_count on appliance details */

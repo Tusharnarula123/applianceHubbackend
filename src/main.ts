@@ -31,7 +31,20 @@ async function bootstrap() {
 
   app.use(json({ limit: MAX_UPLOAD_BYTES }));
   app.use(urlencoded({ extended: true, limit: MAX_UPLOAD_BYTES }));
-  app.useStaticAssets(getUploadsDir(), { prefix: '/uploads/' });
+
+  // Serve local uploads only when R2 is not configured (local dev fallback)
+  const r2Configured = !!(
+    process.env.R2_ACCOUNT_ID &&
+    process.env.R2_ACCESS_KEY_ID &&
+    process.env.R2_SECRET_ACCESS_KEY &&
+    process.env.R2_BUCKET_NAME
+  );
+  if (!r2Configured) {
+    app.useStaticAssets(getUploadsDir(), { prefix: '/uploads/' });
+  }
+
+  // Correct client IP behind reverse proxy (used by rate limiting)
+  app.set('trust proxy', 1);
 
   // Configure Swagger/OpenAPI
   const config = new DocumentBuilder()
@@ -80,6 +93,7 @@ async function bootstrap() {
 ║   • Redis caching with smart invalidation                ║
 ║   • Single query loading (no N+1 problems)               ║
 ║   • Batch operations after queries                       ║
+║   • Rate limiting (per IP, configurable via .env)        ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
   `);

@@ -3,10 +3,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import type { File as MulterFile } from 'multer';
 import { RagService } from '../chat/rag.service.js';
 import { CacheService } from '../../common/cache.service.js';
 import { ActivityService } from '../activities/activity.service.js';
+import { StorageService } from '../../common/storage.service.js';
 import {
   DocumentEntity,
   DOCUMENT_FILE_TYPES,
@@ -53,66 +55,52 @@ export class UploadService {
     private ragService: RagService,
     private cacheService: CacheService,
     private activityService: ActivityService,
+    private storageService: StorageService,
   ) {}
 
   resolveDocumentType(documentType?: string): DocumentFileType {
-    if (!documentType?.trim()) {
-      return 'Manual';
-    }
-
+    if (!documentType?.trim()) return 'Manual';
     const normalized = documentType.trim();
     if ((DOCUMENT_FILE_TYPES as readonly string[]).includes(normalized)) {
       return normalized as DocumentFileType;
     }
-
     const alias = DOCUMENT_TYPE_ALIASES[normalized.toLowerCase()];
-    if (alias) {
-      return alias;
-    }
-
+    if (alias) return alias;
     throw new BadRequestException(
       `Invalid document_type. Allowed: ${DOCUMENT_FILE_TYPES.join(', ')}`,
     );
   }
 
   async uploadDocument(file: MulterFile, applianceId: string, documentType?: string) {
-    if (!file) {
-      throw new BadRequestException('No file provided');
-    }
-
-    // Validate file
+    if (!file) throw new BadRequestException('No file provided');
     this.validateFile(file);
 
-    // Create uploads directory if it doesn't exist
-    try {
-      await fs.mkdir(this.uploadDir, { recursive: true });
-    } catch (error) {
-      console.error('Error creating upload directory:', error);
-    }
-
-    // Generate unique filename
     const fileId = uuidv4();
     const ext = path.extname(file.originalname);
     const filename = `${fileId}${ext}`;
-    const filepath = path.join(this.uploadDir, filename);
+    let fileUrl: string;
 
-    // Save file to disk
-    try {
+    if (this.storageService.isEnabled()) {
+      // ── R2 path ──────────────────────────────────────────────
+      const key = `documents/${filename}`;
+      await this.storageService.upload(file.buffer, key, file.mimetype);
+      fileUrl = this.storageService.fileUrlFromKey(key);
+    } else {
+      // ── Local disk fallback (dev) ─────────────────────────────
+      await fs.mkdir(this.uploadDir, { recursive: true });
+      const filepath = path.join(this.uploadDir, filename);
       await fs.writeFile(filepath, file.buffer);
-    } catch (error) {
-      throw new BadRequestException('Failed to save file');
+      if (!(await fs.stat(filepath)).isFile()) {
+        throw new BadRequestException('Upload did not persist to disk — try again');
+      }
+      fileUrl = `/uploads/${filename}`;
     }
 
-    if (!(await fs.stat(filepath)).isFile()) {
-      throw new BadRequestException('Upload did not persist to disk — try again');
-    }
-
-    // Create document record
     const document = this.documentRepository.create({
       id: fileId,
       appliance_id: applianceId,
       name: file.originalname,
-      file_url: `/uploads/${filename}`,
+      file_url: fileUrl,
       file_size_bytes: file.size,
       file_type: this.resolveDocumentType(documentType),
       mime_type: file.mimetype,
@@ -131,17 +119,16 @@ export class UploadService {
       await this.documentRepository.update(savedDocument.id, {
         embedding_status: 'processing',
       });
-
-      // Auto-embed for Nest AI chat + Python chatbot (same document_chunks table)
       this.scheduleEmbeddingForAppliance(savedDocument.id, applianceId);
-
       return {
         id: savedDocument.id,
         name: savedDocument.name,
         file_url: savedDocument.file_url,
+        public_url: this.resolvePublicUrl(savedDocument.file_url),
         file_size_bytes: savedDocument.file_size_bytes,
         embedding_status: 'processing',
         uploaded_at: savedDocument.created_at,
+        storage: this.storageService.isEnabled() ? 'r2' : 'local',
         message:
           'PDF uploaded. Embedding for the AI chatbot started automatically — poll GET /api/chat/ai/:applianceId/rag-status until ready_for_chat is true.',
       };
@@ -156,16 +143,14 @@ export class UploadService {
       id: savedDocument.id,
       name: savedDocument.name,
       file_url: savedDocument.file_url,
+      public_url: this.resolvePublicUrl(savedDocument.file_url),
       file_size_bytes: savedDocument.file_size_bytes,
       embedding_status: 'indexed',
       uploaded_at: savedDocument.created_at,
+      storage: this.storageService.isEnabled() ? 'r2' : 'local',
     };
   }
 
-  /**
-   * Index uploaded PDF + any other pending/failed PDFs for this appliance.
-   * Same pipeline as `npm run rag:reindex` — no separate script needed on upload.
-   */
   private scheduleEmbeddingForAppliance(documentId: string, applianceId: string): void {
     void (async () => {
       try {
@@ -193,60 +178,44 @@ export class UploadService {
   }
 
   async uploadImage(file: MulterFile) {
-    if (!file) {
-      throw new BadRequestException('No file provided');
-    }
+    if (!file) throw new BadRequestException('No file provided');
 
-    // Validate image
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) {
       throw new BadRequestException('Invalid image type. Allowed: JPEG, PNG, WebP');
     }
-
     if (file.size > 10 * 1024 * 1024) {
-      // 10MB for images
       throw new BadRequestException('Image size must be less than 10MB');
     }
 
-    // Create uploads directory
-    try {
-      await fs.mkdir(this.uploadDir, { recursive: true });
-    } catch (error) {
-      console.error('Error creating upload directory:', error);
-    }
-
-    // Generate unique filename
     const fileId = uuidv4();
     const ext = path.extname(file.originalname);
     const filename = `${fileId}${ext}`;
-    const filepath = path.join(this.uploadDir, filename);
+    let url: string;
 
-    // Save file
-    try {
+    if (this.storageService.isEnabled()) {
+      const key = `images/${filename}`;
+      await this.storageService.upload(file.buffer, key, file.mimetype);
+      url = this.storageService.getPublicUrl(key);
+    } else {
+      await fs.mkdir(this.uploadDir, { recursive: true });
+      const filepath = path.join(this.uploadDir, filename);
       await fs.writeFile(filepath, file.buffer);
-    } catch (error) {
-      throw new BadRequestException('Failed to save image');
+      url = `/uploads/${filename}`;
     }
 
     return {
       id: fileId,
-      filename: filename,
-      url: `/uploads/${filename}`,
+      filename,
+      url,
       size: file.size,
       mimetype: file.mimetype,
+      storage: this.storageService.isEnabled() ? 'r2' : 'local',
     };
   }
 
-  /**
-   * Remove document row (MySQL), RAG chunks (CASCADE), and file on disk (./uploads).
-   */
   async deleteFile(fileId: string, applianceId?: string) {
-    const document = await this.documentRepository.findOne({
-      where: { id: fileId },
-    });
-
-    if (!document) {
-      throw new NotFoundException('File not found');
-    }
+    const document = await this.documentRepository.findOne({ where: { id: fileId } });
+    if (!document) throw new NotFoundException('File not found');
 
     if (applianceId && document.appliance_id !== applianceId) {
       throw new BadRequestException('Document does not belong to this appliance');
@@ -257,18 +226,21 @@ export class UploadService {
       select: ['id', 'business_id'],
     });
 
-    // Delete physical file (metadata lives in SQL `documents` table)
-    try {
-      const filepath = resolveDocumentFilePath(document.file_url);
-      await fs.unlink(filepath);
-    } catch (error) {
-      this.logger.warn(`Could not delete file on disk: ${error}`);
+    // Delete from R2 or local disk
+    if (this.storageService.isEnabled()) {
+      const key = this.storageService.keyFromFileUrl(document.file_url);
+      await this.storageService.delete(key);
+    } else {
+      try {
+        const filepath = resolveDocumentFilePath(document.file_url);
+        await fs.unlink(filepath);
+      } catch (err) {
+        this.logger.warn(`Could not delete local file: ${err}`);
+      }
     }
 
-    // Removes `documents` row; `document_chunks` CASCADE in DB
     await this.documentRepository.remove(document);
     await this.invalidateApplianceDocumentCaches(document.appliance_id, appliance?.business_id);
-
     this.logger.log(`Deleted document ${fileId} for appliance ${document.appliance_id}`);
 
     return {
@@ -276,6 +248,17 @@ export class UploadService {
       id: fileId,
       appliance_id: document.appliance_id,
     };
+  }
+
+  /** Return the publicly accessible URL for a stored file_url */
+  resolvePublicUrl(fileUrl: string): string {
+    if (this.storageService.isEnabled()) {
+      const key = this.storageService.keyFromFileUrl(fileUrl);
+      return this.storageService.getPublicUrl(key);
+    }
+    // Local dev — served by Express static middleware
+    if (fileUrl.startsWith('/')) return fileUrl;
+    return `/${fileUrl}`;
   }
 
   private async invalidateApplianceDocumentCaches(
@@ -297,7 +280,6 @@ export class UploadService {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException('File size exceeds maximum limit of 100MB');
     }
-
     if (!this.allowedMimeTypes.includes(file.mimetype)) {
       throw new BadRequestException(
         'File type not allowed. Allowed types: PDF, DOC, DOCX, JPEG, PNG, WebP',

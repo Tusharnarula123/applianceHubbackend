@@ -13,26 +13,38 @@ export class BusinessEntity {
   @Column('varchar', { length: 255 })
   name: string;
 
-  @Column('text', { nullable: true })
-  description: string;
+  @Column('varchar', { length: 255, nullable: true })
+  email: string;
+
+  @Column('varchar', { length: 255, nullable: true })
+  support_email: string;
 
   @Column('varchar', { length: 255, nullable: true })
   website: string;
 
-  @Column('varchar', { length: 255, nullable: true })
-  contact_email: string;
+  @Column('varchar', { length: 50, nullable: true })
+  phone: string;
 
-  @Column('varchar', { length: 20, nullable: true })
-  contact_phone: string;
-
-  @Column('enum', { enum: ['startup', 'basic', 'pro', 'enterprise'] })
-  plan: string;
-
-  @Column('enum', { enum: ['active', 'trial', 'inactive', 'suspended'] })
-  plan_status: string;
+  @Column('varchar', { length: 100, nullable: true })
+  industry: string;
 
   @Column('text', { nullable: true })
   logo_url: string;
+
+  @Column('enum', {
+    enum: ['startup', 'basic', 'pro', 'enterprise', 'starter', 'growth'],
+    default: 'startup',
+  })
+  plan: string;
+
+  @Column('enum', {
+    enum: ['active', 'trial', 'inactive', 'suspended', 'cancelled', 'past_due'],
+    default: 'active',
+  })
+  plan_status: string;
+
+  @Column('text', { nullable: true })
+  description: string;
 
   @Column('varchar', { length: 255, nullable: true })
   timezone: string;

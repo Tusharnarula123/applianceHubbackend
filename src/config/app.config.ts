@@ -1,7 +1,7 @@
 import { registerAs } from '@nestjs/config';
 
 export default registerAs('app', () => ({
-  /** Public site URL encoded inside the QR code (e.g. https://scana.ai) */
+  /** Public site URL encoded inside the QR code (e.g. https://scana.in) */
   baseUrl: process.env.APP_BASE_URL || process.env.FRONTEND_URL || 'http://localhost:3000',
   /** Public API URL for same-origin QR images (use in <img src>) */
   apiPublicUrl: process.env.API_PUBLIC_URL || 'http://localhost:3001',

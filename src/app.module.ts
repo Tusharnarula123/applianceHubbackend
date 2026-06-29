@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CacheModule } from '@nestjs/cache-manager';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { redisStore } from 'cache-manager-redis-yet';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
@@ -11,6 +13,8 @@ import { AppService } from './app.service.js';
 import databaseConfig from './config/database.config.js';
 import redisConfig from './config/redis.config.js';
 import appConfig from './config/app.config.js';
+import rateLimitConfig from './config/rate-limit.config.js';
+import { ThrottlerBehindProxyGuard } from './common/guards/throttler-behind-proxy.guard.js';
 import { ApplianceModule } from './modules/appliances/appliance.module.js';
 import { BusinessModule } from './modules/businesses/business.module.js';
 import { ClaimModule } from './modules/claims/claim.module.js';
@@ -23,6 +27,7 @@ import { PdfModule } from './modules/pdf/pdf.module.js';
 import { SupportModule } from './modules/support/support.module.js';
 import { UsersModule } from './modules/users/users.module.js';
 import { QrCodeModule } from './modules/qr/qr-code.module.js';
+import { RepairModule } from './modules/repair/repair.module.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -31,7 +36,20 @@ const __dirname = dirname(__filename);
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [databaseConfig, redisConfig, appConfig],
+      load: [databaseConfig, redisConfig, appConfig, rateLimitConfig],
+    }),
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        throttlers: [
+          {
+            name: 'default',
+            ttl: config.get<number>('rateLimit.ttlMs') ?? 60_000,
+            limit: config.get<number>('rateLimit.limit') ?? 100,
+          },
+        ],
+        errorMessage: 'Too many requests. Please try again later.',
+      }),
     }),
     // Redis Cache Manager
     CacheModule.registerAsync({
@@ -55,7 +73,8 @@ const __dirname = dirname(__filename);
         username: config.get('database.username'),
         password: config.get('database.password'),
         database: config.get('database.database'),
-        entities: [join(__dirname, '**', '*.entity.{ts,js}')],
+        // Single entities dir only — avoid stale duplicate metadata from dist/src/
+        entities: [join(__dirname, 'entities', '*.entity.{ts,js}')],
         migrations: [join(__dirname, 'database', 'migrations', '*.{ts,js}')],
         synchronize: false,
         logging: process.env.NODE_ENV !== 'production',
@@ -74,8 +93,15 @@ const __dirname = dirname(__filename);
     SupportModule,
     UsersModule,
     QrCodeModule,
+    RepairModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerBehindProxyGuard,
+    },
+  ],
 })
 export class AppModule {}

@@ -7,6 +7,7 @@ import { UploadController } from './upload.controller.js';
 import { ChatModule } from '../chat/chat.module.js';
 import { ActivityModule } from '../activities/activity.module.js';
 import { CacheService } from '../../common/cache.service.js';
+import { StorageService } from '../../common/storage.service.js';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { CacheService } from '../../common/cache.service.js';
     ActivityModule,
   ],
   controllers: [UploadController],
-  providers: [UploadService, CacheService],
-  exports: [UploadService],
+  providers: [UploadService, CacheService, StorageService],
+  exports: [UploadService, StorageService],
 })
 export class UploadModule {}

@@ -9,7 +9,18 @@ import * as path from 'path';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse') as (buffer: Buffer) => Promise<{ text: string }>;
+type PdfParseFn = (
+  buffer: Buffer,
+  options?: {
+    pagerender?: (pageData: {
+      getTextContent: (opts?: object) => Promise<{
+        items: Array<{ str: string; transform: number[] }>;
+      }>;
+    }) => Promise<string>;
+  },
+) => Promise<{ text: string; numpages: number }>;
+
+const pdfParse = require('pdf-parse') as PdfParseFn;
 
 import { DocumentEntity } from '../../entities/document.entity.js';
 import { DocumentChunkEntity } from '../../entities/document-chunk.entity.js';
@@ -17,13 +28,16 @@ import {
   documentFileExists,
   resolveDocumentFilePath,
 } from '../../common/uploads-path.js';
+import { StorageService } from '../../common/storage.service.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-/** Characters per chunk (~400 tokens at ~4 chars/token) */
-const CHUNK_SIZE = 1600;
-/** Overlap between consecutive chunks to preserve context */
-const CHUNK_OVERLAP = 200;
+/** Max characters per chunk within a single PDF page */
+const PAGE_CHUNK_SIZE = 2000;
+/** Overlap when a page is split into multiple chunks */
+const PAGE_CHUNK_OVERLAP = 150;
+/** Minimum text length to store a chunk */
+const MIN_CHUNK_CHARS = 30;
 /** Embedding model */
 const EMBED_MODEL = 'text-embedding-3-small';
 /** Number of top chunks to return for RAG context */
@@ -45,6 +59,8 @@ export type ChatKnowledgeMediaItem = {
   /** PDF text is in document_chunks (RAG) */
   in_rag: boolean;
   chunk_count: number;
+  /** Highest PDF page number indexed for this document */
+  page_count: number;
 };
 
 export type RagContextResult = {
@@ -54,7 +70,14 @@ export type RagContextResult = {
   /** PDFs/images tied to chunks used for this reply */
   sources: ChatKnowledgeMediaItem[];
   /** Short text previews shown in chat UI */
-  excerpts: Array<{ text: string; score: number }>;
+  excerpts: Array<{
+    text: string;
+    score: number;
+    page_index: number;
+    chunk_index: number;
+    document_id: string;
+    document_name?: string;
+  }>;
 };
 
 // ── Service ─────────────────────────────────────────────────────────────────
@@ -70,6 +93,7 @@ export class RagService implements OnModuleInit {
     @InjectRepository(DocumentChunkEntity)
     private chunkRepo: Repository<DocumentChunkEntity>,
     private configService: ConfigService,
+    private storageService: StorageService,
   ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     this.openai = new OpenAI({ apiKey: apiKey ?? '' });
@@ -89,7 +113,8 @@ export class RagService implements OnModuleInit {
       });
       const toFix: string[] = [];
       for (const doc of pdfs) {
-        if (!documentFileExists(doc.file_url)) {
+        const fileExists = await this.fileExists(doc.file_url);
+        if (!fileExists) {
           if (doc.embedding_status !== 'failed') {
             await this.documentRepo.update(doc.id, { embedding_status: 'failed' });
           }
@@ -139,10 +164,10 @@ export class RagService implements OnModuleInit {
       return;
     }
 
-    if (!documentFileExists(document.file_url)) {
+    if (!(await this.fileExists(document.file_url))) {
       await this.documentRepo.update(documentId, { embedding_status: 'failed' });
       this.logger.warn(
-        `Doc ${documentId}: PDF missing on disk (${resolveDocumentFilePath(document.file_url)}) — delete the row or re-upload`,
+        `Doc ${documentId}: PDF file not found (${document.file_url}) — delete the row or re-upload`,
       );
       return;
     }
@@ -160,20 +185,24 @@ export class RagService implements OnModuleInit {
       // Mark as processing
       await this.documentRepo.update(documentId, { embedding_status: 'processing' });
 
-      // 1. Extract text from PDF
-      const text = await this.extractPdfText(document.file_url);
-      if (!text) {
+      // 1. Extract text page-by-page (1-based page_index for retrieval)
+      const pages = await this.extractPdfPages(document.file_url);
+      if (!pages.length) {
         throw new Error(
           `PDF file missing or unreadable (${document.file_url}). Re-upload the document.`,
         );
       }
-      if (text.trim().length < 20) {
+
+      // 2. Chunk per page — each chunk keeps its PDF page number
+      const chunks = this.chunkPages(pages);
+      const totalChars = pages.reduce((sum, p) => sum + p.text.length, 0);
+      this.logger.log(
+        `Doc ${documentId}: ${pages.length} page(s), ${totalChars} chars → ${chunks.length} chunk(s) (page-indexed)`,
+      );
+
+      if (!chunks.length) {
         throw new Error('PDF contains too little text to embed (scanned image PDFs need OCR)');
       }
-
-      // 2. Chunk the text
-      const chunks = this.chunkText(text);
-      this.logger.log(`Doc ${documentId}: extracted ${text.length} chars → ${chunks.length} chunks`);
 
       // 3. Delete old chunks for this document (re-index)
       await this.chunkRepo.delete({ document_id: documentId });
@@ -182,16 +211,17 @@ export class RagService implements OnModuleInit {
       const BATCH = 20;
       for (let i = 0; i < chunks.length; i += BATCH) {
         const batch = chunks.slice(i, i + BATCH);
-        const embeddings = await this.embedBatch(batch);
+        const embeddings = await this.embedBatch(batch.map((c) => c.content));
 
-        const entities = batch.map((content, j) =>
+        const entities = batch.map((chunk, j) =>
           this.chunkRepo.create({
             id: uuidv4(),
             document_id: documentId,
             appliance_id: document.appliance_id,
-            content,
+            content: chunk.content,
             embedding: embeddings[j] ?? null,
-            chunk_index: i + j,
+            page_index: chunk.page_index,
+            chunk_index: chunk.chunk_index,
           }),
         );
 
@@ -256,16 +286,25 @@ export class RagService implements OnModuleInit {
       if (kind === 'image') imageCount++;
 
       let chunkCount = 0;
+      let pageCount = 0;
       if (kind === 'pdf') {
         chunkCount = await this.chunkRepo
           .createQueryBuilder('c')
           .where('c.document_id = :documentId', { documentId: doc.id })
           .andWhere('c.embedding IS NOT NULL')
           .getCount();
-        if (chunkCount > 0) pdfsInRag++;
+        if (chunkCount > 0) {
+          pdfsInRag++;
+          const maxPage = await this.chunkRepo
+            .createQueryBuilder('c')
+            .select('MAX(c.page_index)', 'max')
+            .where('c.document_id = :documentId', { documentId: doc.id })
+            .getRawOne<{ max: string | null }>();
+          pageCount = Number(maxPage?.max ?? 0);
+        }
       }
 
-      items.push(this.toMediaItem(doc, kind, chunkCount));
+      items.push(this.toMediaItem(doc, kind, chunkCount, pageCount));
     }
 
     return { items, pdfs_in_rag: pdfsInRag, images: imageCount };
@@ -275,6 +314,7 @@ export class RagService implements OnModuleInit {
     doc: DocumentEntity,
     kind: 'pdf' | 'image',
     chunkCount: number,
+    pageCount = 0,
   ): ChatKnowledgeMediaItem {
     const base = this.configService.get<string>('app.apiPublicUrl') || 'http://localhost:3001';
     const apiBase = base.replace(/\/$/, '');
@@ -289,6 +329,7 @@ export class RagService implements OnModuleInit {
       embedding_status: doc.embedding_status,
       in_rag: kind === 'pdf' && chunkCount > 0,
       chunk_count: chunkCount,
+      page_count: pageCount,
     };
   }
 
@@ -302,7 +343,7 @@ export class RagService implements OnModuleInit {
 
       const chunks = await this.chunkRepo.find({
         where: { appliance_id: applianceId },
-        select: ['id', 'document_id', 'content', 'embedding', 'chunk_index'],
+        select: ['id', 'document_id', 'content', 'embedding', 'chunk_index', 'page_index'],
       });
 
       if (!chunks.length) {
@@ -317,11 +358,21 @@ export class RagService implements OnModuleInit {
           return {
             document_id: c.document_id,
             content: c.content,
+            page_index: c.page_index ?? 0,
+            chunk_index: c.chunk_index ?? 0,
             score: this.cosineSimilarity(queryEmbedding, embedding),
           };
         })
         .filter(
-          (c): c is { document_id: string; content: string; score: number } => c !== null,
+          (
+            c,
+          ): c is {
+            document_id: string;
+            content: string;
+            page_index: number;
+            chunk_index: number;
+            score: number;
+          } => c !== null,
         )
         .sort((a, b) => b.score - a.score);
 
@@ -334,15 +385,20 @@ export class RagService implements OnModuleInit {
         return { context: '', chunkCount: 0, topScore, sources: [], excerpts: [] };
       }
 
-      const excerpts = picked.map((c) => ({
-        text: c.content.trim().slice(0, 280),
-        score: c.score,
-      }));
-
       const docIds = [...new Set(picked.map((c) => c.document_id))];
       const docs = await this.documentRepo.find({
         where: { id: In(docIds) },
       });
+      const docNameById = new Map(docs.map((d) => [d.id, d.name]));
+
+      const excerpts = picked.map((c) => ({
+        text: c.content.trim().slice(0, 280),
+        score: c.score,
+        page_index: c.page_index,
+        chunk_index: c.chunk_index,
+        document_id: c.document_id,
+        document_name: docNameById.get(c.document_id),
+      }));
       const sources: ChatKnowledgeMediaItem[] = [];
       for (const doc of docs) {
         const chunkCount = await this.chunkRepo.count({ where: { document_id: doc.id } });
@@ -359,15 +415,21 @@ export class RagService implements OnModuleInit {
       }
 
       const contextText = picked
-        .map((c, i) => `[Manual excerpt ${i + 1}]\n${c.content.trim()}`)
+        .map((c, i) => {
+          const docName = docNameById.get(c.document_id) ?? 'Manual';
+          const pageLabel =
+            c.page_index > 0 ? `Page ${c.page_index}` : 'Page unknown';
+          return `[${docName} — ${pageLabel} — excerpt ${i + 1}]\n${c.content.trim()}`;
+        })
         .join('\n\n');
 
-      const context = `\n\nOFFICIAL PRODUCT MANUAL (uploaded PDF) — YOU MUST USE THIS FIRST:
+      const context = `\n\nOFFICIAL PRODUCT MANUAL (uploaded PDF, page-indexed) — YOU MUST USE THIS FIRST:
 ---
 ${contextText}
 ---
 RULES FOR MANUAL EXCERPTS:
 - Answer ONLY from these excerpts when they cover the user's question.
+- Cite the manual page number when available (e.g. "See page 12 in your manual").
 - Say clearly that the answer comes from the uploaded product manual.
 - Do NOT say your answer is "general knowledge" or "not from a PDF" when excerpts are provided.
 - If excerpts do not cover the question, say the manual does not mention it and offer to help another way.
@@ -454,22 +516,123 @@ RULES FOR MANUAL EXCERPTS:
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  private async extractPdfText(fileUrl: string): Promise<string> {
-    try {
-      const filePath = resolveDocumentFilePath(fileUrl);
+  /**
+   * Check whether a file exists — in R2 or on local disk depending on config.
+   */
+  private async fileExists(fileUrl: string): Promise<boolean> {
+    if (this.storageService.isEnabled()) {
+      const key = this.storageService.keyFromFileUrl(fileUrl);
+      return this.storageService.exists(key);
+    }
+    return documentFileExists(fileUrl);
+  }
 
-      if (!fs.existsSync(filePath)) {
-        this.logger.warn(`PDF file not found: ${filePath}`);
-        return '';
+  /** Extract text per PDF page (page_index is 1-based). */
+  private async extractPdfPages(
+    fileUrl: string,
+  ): Promise<Array<{ page_index: number; text: string }>> {
+    try {
+      let buffer: Buffer;
+
+      if (this.storageService.isEnabled()) {
+        // ── Download from R2 ──────────────────────────────────
+        const key = this.storageService.keyFromFileUrl(fileUrl);
+        try {
+          buffer = await this.storageService.download(key);
+        } catch (err) {
+          this.logger.warn(`R2 download failed for ${key}: ${err}`);
+          return [];
+        }
+      } else {
+        // ── Read from local disk ──────────────────────────────
+        const filePath = resolveDocumentFilePath(fileUrl);
+        if (!fs.existsSync(filePath)) {
+          this.logger.warn(`PDF file not found on disk: ${filePath}`);
+          return [];
+        }
+        buffer = fs.readFileSync(filePath);
+      }
+      const pages: Array<{ page_index: number; text: string }> = [];
+      let currentPage = 0;
+
+      await pdfParse(buffer, {
+        pagerender: (pageData: {
+          getTextContent: (opts?: object) => Promise<{
+            items: Array<{ str: string; transform: number[] }>;
+          }>;
+        }) => {
+          currentPage += 1;
+          const pageIndex = currentPage;
+
+          return pageData.getTextContent({ normalizeWhitespace: true }).then((textContent) => {
+            let lastY: number | undefined;
+            let text = '';
+            for (const item of textContent.items) {
+              const y = item.transform[5];
+              if (lastY !== undefined && y !== lastY) {
+                text += '\n';
+              }
+              text += item.str;
+              lastY = y;
+            }
+
+            const normalised = text.replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim();
+            if (normalised.length >= MIN_CHUNK_CHARS) {
+              pages.push({ page_index: pageIndex, text: normalised });
+            }
+            return text;
+          });
+        },
+      });
+
+      return pages;
+    } catch (err) {
+      this.logger.warn(`PDF page extraction failed: ${err}`);
+      return [];
+    }
+  }
+
+  /**
+   * Build embeddable chunks from page text. Each chunk carries page_index for retrieval.
+   * Long pages are split into sub-chunks sharing the same page_index.
+   */
+  private chunkPages(
+    pages: Array<{ page_index: number; text: string }>,
+  ): Array<{ page_index: number; chunk_index: number; content: string }> {
+    const chunks: Array<{ page_index: number; chunk_index: number; content: string }> = [];
+
+    for (const page of pages) {
+      const normalised = page.text.replace(/\n{3,}/g, '\n\n').trim();
+      if (normalised.length <= PAGE_CHUNK_SIZE) {
+        if (normalised.length >= MIN_CHUNK_CHARS) {
+          chunks.push({
+            page_index: page.page_index,
+            chunk_index: 0,
+            content: normalised,
+          });
+        }
+        continue;
       }
 
-      const buffer = fs.readFileSync(filePath);
-      const result = await pdfParse(buffer);
-      return result.text ?? '';
-    } catch (err) {
-      this.logger.warn(`PDF text extraction failed: ${err}`);
-      return '';
+      let start = 0;
+      let subIndex = 0;
+      while (start < normalised.length) {
+        const end = Math.min(start + PAGE_CHUNK_SIZE, normalised.length);
+        const slice = normalised.slice(start, end).trim();
+        if (slice.length >= MIN_CHUNK_CHARS) {
+          chunks.push({
+            page_index: page.page_index,
+            chunk_index: subIndex,
+            content: slice,
+          });
+          subIndex += 1;
+        }
+        start += PAGE_CHUNK_SIZE - PAGE_CHUNK_OVERLAP;
+        if (start >= normalised.length) break;
+      }
     }
+
+    return chunks;
   }
 
   /** Re-index PDFs for an appliance (pending/failed + "indexed" with no embeddings). */
@@ -485,7 +648,7 @@ RULES FOR MANUAL EXCERPTS:
 
     const needsEmbedding = new Set<string>();
     for (const doc of docs) {
-      if (!documentFileExists(doc.file_url)) {
+      if (!(await this.fileExists(doc.file_url))) {
         if (doc.embedding_status !== 'failed') {
           await this.documentRepo.update(doc.id, { embedding_status: 'failed' });
         }
@@ -529,26 +692,6 @@ RULES FOR MANUAL EXCERPTS:
       indexed,
       failed,
     };
-  }
-
-  private chunkText(text: string): string[] {
-    const chunks: string[] = [];
-    // Normalise whitespace
-    const normalised = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-
-    let start = 0;
-    while (start < normalised.length) {
-      const end = Math.min(start + CHUNK_SIZE, normalised.length);
-      const chunk = normalised.slice(start, end).trim();
-      if (chunk.length > 50) {
-        chunks.push(chunk);
-      }
-      // Move forward with overlap
-      start += CHUNK_SIZE - CHUNK_OVERLAP;
-      if (start >= normalised.length) break;
-    }
-
-    return chunks;
   }
 
   private async embedBatch(texts: string[]): Promise<(number[] | null)[]> {

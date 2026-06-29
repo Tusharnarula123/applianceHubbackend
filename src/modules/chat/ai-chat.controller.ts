@@ -8,6 +8,7 @@ import {
   HttpStatus,
   BadRequestException,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiParam, ApiBody } from '@nestjs/swagger';
 import { AiChatService } from './ai-chat.service.js';
 import { RagService } from './rag.service.js';
@@ -80,6 +81,7 @@ export class AiChatController {
    * Process pending/failed PDFs for RAG (chunk + embed).
    */
   @Post(':applianceId/reindex')
+  @Throttle({ default: { limit: 5, ttl: 300_000 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Index pending PDF documents for RAG' })
   @ApiParam({ name: 'applianceId', description: 'Appliance UUID' })
@@ -123,6 +125,7 @@ export class AiChatController {
    * Returns the session ID, initial welcome message, and UI config.
    */
   @Post('session')
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Start a new AI chat session for an appliance' })
   @ApiBody({ type: StartAiSessionDto })
@@ -151,6 +154,7 @@ export class AiChatController {
    * - pdf_urls       — any PDF download URLs produced during the turn
    */
   @Post('session/:sessionId/message')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Send a message and receive an AI response with tool-call resolution' })
   @ApiParam({ name: 'sessionId', description: 'Chat session UUID' })

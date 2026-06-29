@@ -2,6 +2,7 @@ import { Controller, Get, Param, Query, UseGuards, HttpCode, HttpStatus } from '
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { ApplianceService } from './appliance.service.js';
 import { ActivityService } from '../activities/activity.service.js';
+import { ClaimService } from '../claims/claim.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 
 @ApiTags('Dashboard')
@@ -12,6 +13,7 @@ export class DashboardController {
   constructor(
     private applianceService: ApplianceService,
     private activityService: ActivityService,
+    private claimService: ClaimService,
   ) {}
 
   /**
@@ -58,6 +60,24 @@ export class DashboardController {
     @Query('sort') sort: string = 'created_at',
   ) {
     return this.applianceService.getAppliancesByBusiness(businessId, limit, offset);
+  }
+
+  /**
+   * GET /api/dashboard/claims/:businessId
+   * Claim history across all appliances (includes chatbot-filed claims)
+   */
+  @Get('claims/:businessId')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Get claim history for dashboard' })
+  @ApiParam({ name: 'businessId', description: 'Business ID' })
+  @ApiQuery({ name: 'limit', required: false, example: 50 })
+  @ApiQuery({ name: 'offset', required: false, example: 0 })
+  async getClaimHistory(
+    @Param('businessId') businessId: string,
+    @Query('limit') limit: number = 50,
+    @Query('offset') offset: number = 0,
+  ) {
+    return this.claimService.getClaimsByBusiness(businessId, limit, offset);
   }
 
   /**

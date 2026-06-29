@@ -38,10 +38,11 @@ export class AuthService {
     const business = this.businessRepository.create({
       id: uuidv4(),
       name: business_name,
-      contact_phone: business_phone,
+      email: email,
+      phone: business_phone ?? null,
       metadata: { address: business_address },
-    });
-    const savedBusiness = await this.businessRepository.save(business);
+    } as any);
+    const savedBusiness = await this.businessRepository.save(business) as any;
 
     // Create user
     const user = this.userRepository.create({

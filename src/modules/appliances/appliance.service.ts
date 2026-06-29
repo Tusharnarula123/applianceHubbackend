@@ -95,6 +95,8 @@ export class ApplianceService {
       ...appliance,
       documents_count: appliance.documents?.length || 0,
       claims_count: appliance.claims?.length || 0,
+      pending_claims:
+        appliance.claims?.filter((c) => c.status !== 'resolved')?.length || 0,
     }));
 
     const response = { data: result, total, limit, offset };
@@ -143,11 +145,25 @@ export class ApplianceService {
       select: ['id', 'name', 'model', 'status'],
     });
 
-    if (appliance) {
-      await this.cacheService.set(cacheKey, appliance, 3600);
+    if (!appliance) {
+      return null;
     }
 
-    return appliance;
+    const claims = [...(appliance.claims ?? [])].sort(
+      (a, b) => new Date(b.filed_at).getTime() - new Date(a.filed_at).getTime(),
+    );
+
+    const result = {
+      id: appliance.id,
+      name: appliance.name,
+      model: appliance.model,
+      status: appliance.status,
+      claims,
+      total: claims.length,
+    };
+
+    await this.cacheService.set(cacheKey, result, 3600);
+    return result;
   }
 
   /**

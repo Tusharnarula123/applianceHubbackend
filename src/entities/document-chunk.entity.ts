@@ -22,8 +22,13 @@ export class DocumentChunkEntity {
   @Column('json', { nullable: true })
   embedding: number[] | null;
 
+  /** Sub-chunk index within a PDF page (0 = first slice on that page) */
   @Column('int', { default: 0 })
   chunk_index: number;
+
+  /** 1-based PDF page number this chunk was extracted from */
+  @Column('int', { default: 0 })
+  page_index: number;
 
   @CreateDateColumn()
   created_at: Date;

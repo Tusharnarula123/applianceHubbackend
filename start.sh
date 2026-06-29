@@ -1,3 +1,8 @@
 #!/bin/bash
-export NODE_OPTIONS="--require /app/polyfill.cjs"
-exec npm run start:dev
+set -e
+
+echo "==> Running database migrations..."
+npm run migration:run
+
+echo "==> Starting application..."
+exec node dist/main.js

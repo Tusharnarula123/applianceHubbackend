@@ -15,6 +15,9 @@ import { QrCodeEntity } from '../../entities/qr-code.entity.js';
 import { RagService } from './rag.service.js';
 import { CacheService } from '../../common/cache.service.js';
 import { ActivityService } from '../activities/activity.service.js';
+import { resolveClaimWarrantyId } from '../../common/resolve-claim-warranty.js';
+import { RepairService } from '../repair/repair.service.js';
+import { SparePartsService } from '../repair/spare-parts.service.js';
 
 // ─── Tool definitions for OpenAI ───────────────────────────────────────────
 
@@ -102,7 +105,8 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
           },
           warranty_id: {
             type: 'string',
-            description: 'Associated warranty ID if applicable. Optional.',
+            description:
+              'Optional. Must be a real warranty UUID from get_warranties for this appliance. Omit if unknown — do not invent IDs.',
           },
         },
         required: ['customer_name', 'customer_email', 'issue', 'priority'],
@@ -190,9 +194,48 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'register_warranty',
+      description:
+        'Register a warranty for the appliance on behalf of the customer. Collect their name, email, phone, serial number, and purchase date before calling. Always offer this after a customer mentions they just bought the appliance or asks about warranty.',
+      parameters: {
+        type: 'object',
+        properties: {
+          customer_name:  { type: 'string', description: "Customer's full name." },
+          customer_email: { type: 'string', description: "Customer's email address." },
+          customer_phone: { type: 'string', description: "Customer's phone number. Optional." },
+          serial_number:  { type: 'string', description: 'Appliance serial number (printed on the back or in the manual).' },
+          purchase_date:  { type: 'string', description: 'Date of purchase in YYYY-MM-DD format.' },
+          warranty_years: { type: 'number', description: 'Warranty period in years. Default 1 if unknown.' },
+        },
+        required: ['customer_name', 'customer_email', 'purchase_date'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_appliance_pdf_url',
       description: 'Get the download URL for a full appliance report PDF.',
       parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_youtube',
+      description:
+        'Search YouTube for tutorial, how-to, or repair videos relevant to this appliance. Call this for ANY troubleshooting, installation, setup, or maintenance question to enrich the answer with a real tutorial video.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description:
+              'YouTube search query. Include the appliance name/model and the specific task, e.g. "Samsung front load washer drain filter cleaning tutorial".',
+          },
+        },
+        required: ['query'],
+      },
     },
   },
   {
@@ -216,6 +259,105 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
           },
         },
         required: ['prompt'],
+      },
+    },
+  },
+  /* ── Repair Dispatch ─────────────────────────────────── */
+  {
+    type: 'function',
+    function: {
+      name: 'request_repair',
+      description:
+        'Book a repair technician for the customer when they report a fault, malfunction, or need a service visit. Collect customer name, phone, address/city/zipcode, and issue description before calling. Automatically finds the nearest available agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          customer_name:    { type: 'string', description: "Customer's full name." },
+          customer_phone:   { type: 'string', description: "Customer's phone number." },
+          customer_email:   { type: 'string', description: "Customer's email address. Optional." },
+          customer_address: { type: 'string', description: 'Street address.' },
+          customer_city:    { type: 'string', description: 'City name — used to find nearby agents.' },
+          customer_zipcode: { type: 'string', description: 'Postal / ZIP code. Optional.' },
+          issue_description:{ type: 'string', description: 'Detailed description of the problem with the appliance.' },
+        },
+        required: ['customer_name', 'customer_phone', 'customer_city', 'issue_description'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'check_repair_status',
+      description:
+        'Check the current status of a repair request for this chat session. Use when the customer asks "what is the status of my repair" or "has my technician been assigned".',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_spare_parts',
+      description:
+        'Show available spare parts for this appliance. Use when the customer wants to order a part, asks about spare parts availability, or mentions a component that might need replacement.',
+      parameters: {
+        type: 'object',
+        properties: {
+          issue: {
+            type: 'string',
+            description: 'Optional: the issue or component name to filter relevant parts.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'order_parts',
+      description:
+        'Place a spare parts order for the customer. Collect customer details and list of parts with quantities before calling.',
+      parameters: {
+        type: 'object',
+        properties: {
+          customer_name:    { type: 'string' },
+          customer_email:   { type: 'string' },
+          customer_phone:   { type: 'string' },
+          customer_address: { type: 'string', description: 'Delivery address.' },
+          items: {
+            type: 'array',
+            description: 'Parts to order.',
+            items: {
+              type: 'object',
+              properties: {
+                part_id:    { type: 'string', description: 'Part ID from get_spare_parts.' },
+                name:       { type: 'string' },
+                part_number:{ type: 'string' },
+                quantity:   { type: 'number' },
+                unit_price: { type: 'number' },
+              },
+              required: ['part_id', 'name', 'quantity', 'unit_price'],
+            },
+          },
+        },
+        required: ['customer_name', 'customer_address', 'items'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'rate_repair_agent',
+      description:
+        'Submit a review and star rating for the repair technician after the job is completed. Use when the customer wants to rate or review the technician.',
+      parameters: {
+        type: 'object',
+        properties: {
+          rating:        { type: 'number', description: 'Rating from 1 to 5 stars.' },
+          comment:       { type: 'string', description: 'Optional written review.' },
+          reviewer_name: { type: 'string', description: "Reviewer's name." },
+        },
+        required: ['rating'],
       },
     },
   },
@@ -247,6 +389,8 @@ export class AiChatService {
     private ragService: RagService,
     private cacheService: CacheService,
     private activityService: ActivityService,
+    private repairService: RepairService,
+    private sparePartsService: SparePartsService,
   ) {
     this.openai = new OpenAI({
       apiKey: this.configService.get<string>('OPENAI_API_KEY'),
@@ -408,10 +552,11 @@ export class AiChatService {
     ];
 
     // 6. Run the tool-calling loop
-    const { finalContent, toolCallsMade, pdfUrls, imageUrls } = await this.runToolLoop(
+    const { finalContent, toolCallsMade, pdfUrls, imageUrls, actionCards } = await this.runToolLoop(
       openaiMessages,
       appliance,
       customerContext,
+      sessionId,
     );
 
     // 6. Save assistant reply to DB
@@ -433,6 +578,7 @@ export class AiChatService {
       tool_calls_made: toolCallsMade,
       pdf_urls: pdfUrls,
       image_urls: imageUrls,
+      action_cards: actionCards,
       rag_used: rag.chunkCount > 0,
       rag_chunks: rag.chunkCount,
       /** PDFs used for this answer + related images to render under the message */
@@ -481,11 +627,12 @@ TONE: ${toneInstruction}
 ${customerInfo}
 
 CAPABILITIES — you help customers with:
-• Warranty registration lookups and certificate downloads
+• Warranty registration, lookups, and certificate downloads
 • Filing and tracking service claims
 • Scheduling and managing service bookings
 • General product information, appliance details, and troubleshooting
-• Generating images (diagrams, part visuals, illustrations) when asked — use generate_image tool
+• Searching YouTube for tutorial videos (use search_youtube tool)
+• Generating images (diagrams, part visuals, illustrations) when asked (use generate_image tool)
 
 TOOL USE GUIDELINES:
 - Always call the relevant tool before answering questions about real data. Never invent IDs.
@@ -493,6 +640,34 @@ TOOL USE GUIDELINES:
 - After creating a claim or booking, proactively offer a PDF confirmation.
 - If data is not found, say so clearly and offer to create a new record.
 - Keep replies concise, actionable, and in the configured tone above.
+
+FLOWCHART RULES (MANDATORY for how-to, setup, installation, troubleshooting):
+- ALWAYS include a Mermaid diagram. Start with a %% title: comment.
+- Use classDef to colour nodes: action=blue, decision=teal, done=green, warn=red.
+- Add emoji at the start of every node label (🔧🔍❓✅⚠️🛠️💧🧹🔩).
+- Use {braces} for decisions, [( )] for rounded start/end terminals, [ ] for action steps.
+- Example:
+\`\`\`mermaid
+%% title: Fix Drain Issue
+flowchart TD
+  classDef action fill:#1a5f8a,stroke:#0f3f5c,color:#fff
+  classDef decision fill:#0d7e72,stroke:#085e55,color:#fff
+  classDef done fill:#059669,stroke:#047857,color:#fff
+  classDef warn fill:#dc2626,stroke:#b91c1c,color:#fff
+  A([🔍 Start here]):::done --> B{💧 Water in tub?}:::decision
+  B -- Yes --> C[🧹 Clean drain filter]:::action
+  B -- No --> D[🔩 Check drain hose]:::action
+  C --> E([✅ Done]):::done
+\`\`\`
+- Keep node text under 5 words after the emoji.
+
+YOUTUBE SEARCH RULE (MANDATORY):
+- For ANY troubleshooting, repair, installation, setup, or maintenance question: call search_youtube FIRST.
+- After your explanation and flowchart, include the top result URL on its own line: https://youtu.be/VIDEO_ID
+- If search returns no results, skip the URL silently.
+
+IMAGE RULES:
+- After flowchart and YouTube link, embed relevant manual page images: ![description](url)
 
 Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`;
   }
@@ -502,10 +677,12 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
     messages: OpenAI.Chat.ChatCompletionMessageParam[],
     appliance: ApplianceEntity,
     customerContext?: { customer_name?: string; customer_email?: string },
-  ): Promise<{ finalContent: string; toolCallsMade: string[]; pdfUrls: Record<string, string>; imageUrls: Record<string, string> }> {
+    sessionId?: string,
+  ): Promise<{ finalContent: string; toolCallsMade: string[]; pdfUrls: Record<string, string>; imageUrls: Record<string, string>; actionCards: any[] }> {
     const toolCallsMade: string[] = [];
     const pdfUrls: Record<string, string> = {};
     const imageUrls: Record<string, string> = {};
+    const actionCards: any[] = [];
     const MAX_ROUNDS = 8; // prevent infinite loops
     let round = 0;
 
@@ -520,7 +697,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
         tools: CHATBOT_TOOLS,
         tool_choice: 'auto',
         temperature: 0.4,
-        max_tokens: 1024,
+        max_tokens: 2048,
       });
 
       const choice = completion.choices[0];
@@ -533,6 +710,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
           toolCallsMade,
           pdfUrls,
           imageUrls,
+          actionCards,
         };
       }
 
@@ -552,7 +730,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
         toolCallsMade.push(fnName);
         this.logger.log(`Tool call: ${fnName}(${JSON.stringify(args)})`);
 
-        const result = await this.executeTool(fnName, args, appliance, customerContext, pdfUrls, imageUrls);
+        const result = await this.executeTool(fnName, args, appliance, customerContext, pdfUrls, imageUrls, sessionId, actionCards);
 
         currentMessages.push({
           role: 'tool',
@@ -568,6 +746,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
       toolCallsMade,
       pdfUrls,
       imageUrls,
+      actionCards,
     };
   }
 
@@ -579,9 +758,18 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
     customerContext?: { customer_name?: string; customer_email?: string },
     pdfUrls?: Record<string, string>,
     imageUrls?: Record<string, string>,
+    sessionId?: string,
+    actionCards?: any[],
   ): Promise<unknown> {
     const applianceId = appliance.id;
-    const baseUrl = this.configService.get<string>('APP_BASE_URL') ?? 'http://localhost:3001';
+    // Use the backend API URL for PDF links — customers open these directly in their browser.
+    // API_PUBLIC_URL is the publicly reachable backend address (e.g. http://localhost:3001 in dev,
+    // https://api.yourdomain.com in production). Fall back to port 3001.
+    const baseUrl = (
+      this.configService.get<string>('API_PUBLIC_URL') ??
+      this.configService.get<string>('APP_BASE_URL') ??
+      'http://localhost:3001'
+    ).replace(/\/$/, '');
 
     switch (name) {
       // ── Appliance ────────────────────────────────────────────
@@ -611,7 +799,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
       }
 
       case 'get_appliance_pdf_url': {
-        const url = `${baseUrl}/pdf/appliance/${applianceId}`;
+        const url = `${baseUrl}/api/pdf/appliance/${applianceId}`;
         if (pdfUrls) pdfUrls['appliance_report'] = url;
         return { pdf_url: url, description: 'Full appliance report PDF' };
       }
@@ -637,7 +825,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
       }
 
       case 'get_warranty_pdf_url': {
-        const url = `${baseUrl}/pdf/warranty/${args.warranty_id}`;
+        const url = `${baseUrl}/api/pdf/warranty/${args.warranty_id}`;
         if (pdfUrls) pdfUrls[`warranty_${args.warranty_id}`] = url;
         return { pdf_url: url, description: 'Warranty certificate PDF' };
       }
@@ -666,16 +854,28 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
 
       case 'create_claim': {
         const now = new Date();
+        const customerEmail = args.customer_email ?? customerContext?.customer_email ?? '';
+        const warrantyId = await resolveClaimWarrantyId(
+          this.warrantyRepo,
+          applianceId,
+          args.warranty_id,
+          customerEmail,
+        );
+        if (args.warranty_id?.trim() && !warrantyId) {
+          this.logger.warn(
+            `create_claim: ignored invalid warranty_id "${args.warranty_id}" for appliance ${applianceId}`,
+          );
+        }
         const claim = this.claimRepo.create({
           id: uuidv4(),
           appliance_id: applianceId,
           customer_name: args.customer_name ?? customerContext?.customer_name ?? 'Unknown',
-          customer_email: args.customer_email ?? customerContext?.customer_email ?? '',
+          customer_email: customerEmail,
           customer_phone: args.customer_phone,
           issue: args.issue,
           status: 'open',
           priority: args.priority ?? 'medium',
-          warranty_id: args.warranty_id ?? null,
+          warranty_id: warrantyId ?? undefined,
           filed_at: now,
         });
         const saved = await this.claimRepo.save(claim);
@@ -696,12 +896,13 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
           status: saved.status,
           priority: saved.priority,
           filed_at: saved.filed_at,
+          warranty_linked: !!saved.warranty_id,
           message: 'Claim successfully filed.',
         };
       }
 
       case 'get_claim_pdf_url': {
-        const url = `${baseUrl}/pdf/claim/${args.claim_id}`;
+        const url = `${baseUrl}/api/pdf/claim/${args.claim_id}`;
         if (pdfUrls) pdfUrls[`claim_${args.claim_id}`] = url;
         return { pdf_url: url, description: 'Claim details PDF' };
       }
@@ -747,6 +948,17 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
           applianceId,
           appliance.business_id,
         );
+        actionCards?.push({
+          type: 'booking_confirmed',
+          booking_id: saved.id,
+          booking_ref: saved.id.slice(0, 8).toUpperCase(),
+          customer_name: saved.customer_name,
+          service_type: saved.service_type,
+          preferred_date: saved.preferred_date,
+          preferred_time: saved.preferred_time ?? null,
+          status: saved.status,
+          appliance_name: appliance.name,
+        });
         return {
           success: true,
           booking_id: saved.id,
@@ -759,9 +971,76 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
       }
 
       case 'get_booking_pdf_url': {
-        const url = `${baseUrl}/pdf/booking/${args.booking_id}`;
+        const url = `${baseUrl}/api/pdf/booking/${args.booking_id}`;
         if (pdfUrls) pdfUrls[`booking_${args.booking_id}`] = url;
         return { pdf_url: url, description: 'Booking confirmation PDF' };
+      }
+
+      // ── Register Warranty ─────────────────────────────────────
+      case 'register_warranty': {
+        try {
+          const purchaseDate = args.purchase_date ? new Date(args.purchase_date) : new Date();
+          const warrantyYears = Number(args.warranty_years ?? 1);
+          const expiryDate = new Date(purchaseDate);
+          expiryDate.setFullYear(expiryDate.getFullYear() + warrantyYears);
+
+          const warranty = this.warrantyRepo.create({
+            id: uuidv4(),
+            appliance_id: applianceId,
+            customer_name: args.customer_name ?? customerContext?.customer_name ?? 'Unknown',
+            customer_email: args.customer_email ?? customerContext?.customer_email ?? '',
+            customer_phone: args.customer_phone ?? null,
+            serial_number: args.serial_number ?? null,
+            purchase_date: purchaseDate,
+            expiry_date: expiryDate,
+            status: 'active',
+          });
+          const saved = await this.warrantyRepo.save(warranty);
+
+          await this.activityService.logForAppliance(
+            applianceId,
+            'claim' as any,
+            `Warranty registered via chatbot: ${saved.customer_name}`,
+            { warranty_id: saved.id, source: 'chatbot' },
+          );
+
+          actionCards?.push({
+            type: 'warranty_registered',
+            warranty_id: saved.id,
+            warranty_ref: saved.id.slice(0, 8).toUpperCase(),
+            customer_name: saved.customer_name,
+            customer_email: saved.customer_email,
+            serial_number: saved.serial_number ?? null,
+            purchase_date: saved.purchase_date,
+            expiry_date: saved.expiry_date,
+            status: saved.status,
+            appliance_name: appliance.name,
+          });
+
+          return {
+            success: true,
+            warranty_id: saved.id,
+            warranty_ref: saved.id.slice(0, 8).toUpperCase(),
+            customer_name: saved.customer_name,
+            status: saved.status,
+            purchase_date: saved.purchase_date,
+            expiry_date: saved.expiry_date,
+            message: `Warranty registered successfully! Reference: **${saved.id.slice(0, 8).toUpperCase()}** — valid until **${expiryDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}**.`,
+          };
+        } catch (err: any) {
+          return { error: `Failed to register warranty: ${err?.message ?? err}` };
+        }
+      }
+
+      // ── YouTube Search ────────────────────────────────────────
+      case 'search_youtube': {
+        if (!args.query) return { error: 'query is required' };
+        const videos = await this.searchYouTubeVideos(String(args.query));
+        if (!videos.length) return { message: 'No videos found. Do not mention YouTube in your reply.', videos: [] };
+        return {
+          videos,
+          message: `Found ${videos.length} tutorial video(s). Include the top video URL as a YouTube link in your response like: https://youtu.be/${videos[0].videoId}`,
+        };
       }
 
       // ── Image Generation ──────────────────────────────────────
@@ -797,8 +1076,215 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
         }
       }
 
+      /* ── Repair Dispatch ────────────────────────────────── */
+      case 'request_repair': {
+        try {
+          const req = await this.repairService.createRequest({
+            appliance_id: applianceId,
+            session_id: sessionId,
+            customer_name: args.customer_name,
+            customer_email: args.customer_email ?? customerContext?.customer_email,
+            customer_phone: args.customer_phone,
+            customer_address: args.customer_address,
+            customer_city: args.customer_city,
+            customer_zipcode: args.customer_zipcode,
+            issue_description: args.issue_description,
+          });
+          // Auto-assign nearest available agent
+          const agents = await this.repairService.findNearbyAgents(
+            appliance.business_id,
+            args.customer_city,
+            args.customer_zipcode,
+            appliance.category,
+          );
+          let assignedAgent: any = null;
+          if (agents.length > 0) {
+            await this.repairService.assignAgent(req.id, { agent_id: agents[0].id });
+            assignedAgent = agents[0];
+          }
+          actionCards?.push({
+            type: 'repair_dispatched',
+            request_id: req.id,
+            request_ref: req.id.slice(0, 8).toUpperCase(),
+            customer_name: args.customer_name,
+            customer_city: args.customer_city,
+            issue_description: args.issue_description,
+            status: assignedAgent ? 'assigned' : 'pending',
+            agent: assignedAgent
+              ? { name: assignedAgent.name, phone: assignedAgent.phone, rating: assignedAgent.rating }
+              : null,
+            appliance_name: appliance.name,
+          });
+          return {
+            success: true,
+            request_id: req.id.slice(0, 8).toUpperCase(),
+            full_id: req.id,
+            status: assignedAgent ? 'assigned' : 'pending',
+            agent: assignedAgent
+              ? { name: assignedAgent.name, phone: assignedAgent.phone, rating: assignedAgent.rating }
+              : null,
+            message: assignedAgent
+              ? `Repair request created and technician **${assignedAgent.name}** (rated ${assignedAgent.rating}★) has been assigned. They will contact you shortly.`
+              : 'Repair request created. We are searching for the nearest available technician and will notify you via SMS/email once assigned.',
+          };
+        } catch (err: any) {
+          return { error: `Failed to create repair request: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'check_repair_status': {
+        try {
+          const req = await this.repairService.getRepairSummaryBySession(sessionId ?? '');
+          if (!req) {
+            return { message: 'No repair request found for this session. Would you like to book a repair?' };
+          }
+          return {
+            request_id: req.id.slice(0, 8).toUpperCase(),
+            status: req.status,
+            issue: req.issue_description,
+            agent: req.agent
+              ? { name: req.agent.name, phone: req.agent.phone, rating: req.agent.rating }
+              : null,
+            scheduled_date: req.scheduled_date,
+            completed_date: req.completed_date,
+            repair_cost: req.repair_cost,
+          };
+        } catch (err: any) {
+          return { error: `Could not retrieve repair status: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'get_spare_parts': {
+        try {
+          const parts = await this.sparePartsService.suggestParts(
+            applianceId,
+            args.issue ?? '',
+          );
+          if (!parts.length) {
+            return { message: 'No spare parts are currently listed for this appliance. Please contact support for assistance.' };
+          }
+          return {
+            parts,
+            count: parts.length,
+            message: `Found ${parts.length} spare part(s) available for your ${appliance.name}.`,
+          };
+        } catch (err: any) {
+          return { error: `Could not retrieve parts: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'order_parts': {
+        try {
+          const order = await this.sparePartsService.createOrder({
+            appliance_id: applianceId,
+            session_id: sessionId,
+            customer_name: args.customer_name,
+            customer_email: args.customer_email ?? customerContext?.customer_email,
+            customer_phone: args.customer_phone,
+            customer_address: args.customer_address,
+            items: args.items,
+          });
+          actionCards?.push({
+            type: 'parts_ordered',
+            order_id: order.id,
+            order_ref: order.id.slice(0, 8).toUpperCase(),
+            customer_name: args.customer_name,
+            customer_address: args.customer_address,
+            items: order.items,
+            total_amount: order.total_amount,
+            status: 'confirmed',
+            appliance_name: appliance.name,
+          });
+          return {
+            success: true,
+            order_id: order.id.slice(0, 8).toUpperCase(),
+            full_id: order.id,
+            total_amount: order.total_amount,
+            status: 'confirmed',
+            message: `Parts order placed successfully! Order ID: **${order.id.slice(0,8).toUpperCase()}** — Total: **$${Number(order.total_amount).toFixed(2)}**. You'll receive a confirmation email and we'll notify you when it ships.`,
+          };
+        } catch (err: any) {
+          return { error: `Failed to place parts order: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'rate_repair_agent': {
+        try {
+          const req = await this.repairService.getRepairSummaryBySession(sessionId ?? '');
+          if (!req || !req.agent_id) {
+            return { error: 'No completed repair with an assigned agent found for this session.' };
+          }
+          const review = await this.repairService.submitReview({
+            repair_request_id: req.id,
+            rating: Math.min(5, Math.max(1, Math.round(Number(args.rating)))),
+            comment: args.comment,
+            reviewer_name: args.reviewer_name ?? customerContext?.customer_name,
+          });
+          return {
+            success: true,
+            rating: review.rating,
+            message: `Thank you for your ${review.rating}★ review! Your feedback helps us maintain quality service.`,
+          };
+        } catch (err: any) {
+          return { error: `Could not submit review: ${err?.message ?? err}` };
+        }
+      }
+
       default:
         return { error: `Unknown tool: ${name}` };
+    }
+  }
+
+  /** Search YouTube via the InnerTube API (no API key required) */
+  private async searchYouTubeVideos(
+    query: string,
+  ): Promise<Array<{ videoId: string; title: string; channel: string }>> {
+    try {
+      const res = await fetch('https://www.youtube.com/youtubei/v1/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'X-YouTube-Client-Name': '1',
+          'X-YouTube-Client-Version': '2.20231121.08.00',
+        },
+        body: JSON.stringify({
+          query,
+          context: {
+            client: {
+              hl: 'en',
+              gl: 'US',
+              clientName: 'WEB',
+              clientVersion: '2.20231121.08.00',
+            },
+          },
+        }),
+      });
+      if (!res.ok) {
+        this.logger.warn(`YouTube search HTTP ${res.status} for: ${query}`);
+        return [];
+      }
+      const data = (await res.json()) as any;
+      const items: any[] =
+        data?.contents?.twoColumnSearchResultsRenderer?.primaryContents
+          ?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents ?? [];
+
+      const videos: Array<{ videoId: string; title: string; channel: string }> = [];
+      for (const item of items) {
+        const v = item?.videoRenderer;
+        if (!v?.videoId) continue;
+        videos.push({
+          videoId: v.videoId as string,
+          title: (v.title?.runs?.[0]?.text as string) ?? 'Tutorial',
+          channel: (v.ownerText?.runs?.[0]?.text as string) ?? '',
+        });
+        if (videos.length >= 3) break;
+      }
+      this.logger.log(`YouTube search "${query}" → ${videos.length} result(s)`);
+      return videos;
+    } catch (err: any) {
+      this.logger.warn(`YouTube search failed: ${err?.message ?? err}`);
+      return [];
     }
   }
 }

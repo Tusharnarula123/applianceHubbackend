@@ -10,13 +10,22 @@ import { BookingEntity } from '../../entities/booking.entity.js';
 import { QrCodeEntity } from '../../entities/qr-code.entity.js';
 import { DocumentEntity } from '../../entities/document.entity.js';
 import { DocumentChunkEntity } from '../../entities/document-chunk.entity.js';
+import { RepairAgentEntity } from '../../entities/repair-agent.entity.js';
+import { RepairRequestEntity } from '../../entities/repair-request.entity.js';
+import { RepairReviewEntity } from '../../entities/repair-review.entity.js';
+import { SparePartEntity } from '../../entities/spare-part.entity.js';
+import { PartsOrderEntity } from '../../entities/parts-order.entity.js';
 import { ChatController } from './chat.controller.js';
 import { ChatService } from './chat.service.js';
 import { AiChatController } from './ai-chat.controller.js';
 import { AiChatService } from './ai-chat.service.js';
 import { RagService } from './rag.service.js';
 import { CacheService } from '../../common/cache.service.js';
+import { StorageService } from '../../common/storage.service.js';
 import { ActivityModule } from '../activities/activity.module.js';
+import { RepairService } from '../repair/repair.service.js';
+import { SparePartsService } from '../repair/spare-parts.service.js';
+import { RepairNotificationService } from '../repair/notification.service.js';
 
 @Module({
   imports: [
@@ -32,10 +41,24 @@ import { ActivityModule } from '../activities/activity.module.js';
       QrCodeEntity,
       DocumentEntity,
       DocumentChunkEntity,
+      RepairAgentEntity,
+      RepairRequestEntity,
+      RepairReviewEntity,
+      SparePartEntity,
+      PartsOrderEntity,
     ]),
   ],
   controllers: [ChatController, AiChatController],
-  providers: [ChatService, AiChatService, RagService, CacheService],
+  providers: [
+    ChatService,
+    AiChatService,
+    RagService,
+    CacheService,
+    StorageService,
+    RepairService,
+    SparePartsService,
+    RepairNotificationService,
+  ],
   exports: [ChatService, AiChatService, RagService],
 })
 export class ChatModule {}

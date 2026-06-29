@@ -73,12 +73,21 @@ async function bootstrap() {
 
   // Enable CORS
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      'https://scana.in',
-      'https://www.scana.in',
-      /\.vercel\.app$/,
-    ],
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, curl, Postman)
+      if (!origin) return callback(null, true);
+      const allowed = [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'https://scana.in',
+        'https://www.scana.in',
+      ];
+      if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,

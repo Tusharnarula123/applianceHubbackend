@@ -51,17 +51,34 @@ const __dirname = dirname(__filename);
         errorMessage: 'Too many requests. Please try again later.',
       }),
     }),
-    // Redis Cache Manager
+    // Redis Cache Manager (falls back to in-memory if Redis is unavailable)
     CacheModule.registerAsync({
       isGlobal: true,
       inject: [ConfigService],
-      useFactory: async (configService: ConfigService) => ({
-        store: redisStore as any,
-        host: configService.get('redis.host'),
-        port: configService.get('redis.port'),
-        ttl: configService.get('redis.ttl'),
-        db: configService.get('redis.db'),
-      }),
+      useFactory: async (configService: ConfigService) => {
+        const host = configService.get<string>('redis.host');
+        const port = configService.get<number>('redis.port');
+        const ttl = configService.get<number>('redis.ttl');
+        // Only use Redis if host is explicitly set to something other than localhost
+        // OR if REDIS_URL env var is present
+        const redisUrl = process.env.REDIS_URL;
+        const useRedis = redisUrl || (host && host !== 'localhost' && host !== '127.0.0.1');
+        if (useRedis) {
+          try {
+            const store = await redisStore({
+              socket: { host, port },
+              ttl,
+            } as any);
+            console.log(`[Cache] Redis connected at ${host}:${port}`);
+            return { store: store as any, ttl };
+          } catch (err) {
+            console.warn(`[Cache] Redis unavailable (${err.message}), falling back to in-memory cache`);
+          }
+        } else {
+          console.log('[Cache] Redis not configured, using in-memory cache');
+        }
+        return { ttl };
+      },
     }),
     // Database
     TypeOrmModule.forRootAsync({

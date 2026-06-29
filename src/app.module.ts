@@ -93,7 +93,7 @@ const __dirname = dirname(__filename);
         // Single entities dir only — avoid stale duplicate metadata from dist/src/
         entities: [join(__dirname, 'entities', '*.entity.{ts,js}')],
         migrations: [join(__dirname, 'database', 'migrations', '*.{ts,js}')],
-        synchronize: false,
+        synchronize: process.env.DB_SYNC === 'true',
         logging: process.env.NODE_ENV !== 'production',
       }),
     }),

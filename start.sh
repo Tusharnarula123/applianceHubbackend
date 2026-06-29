@@ -18,15 +18,8 @@ for i in $(seq 1 15); do
 done
 
 if [ "$DB_RESET" = "true" ]; then
-  echo "==> DB_RESET=true — dropping all tables for clean TypeORM sync..."
-  node scripts/drop-all-tables.cjs
-fi
-
-if [ "$DB_SYNC" = "true" ]; then
-  echo "==> DB_SYNC=true — skipping migrations, TypeORM will auto-sync schema"
-else
-  echo "==> Running database migrations..."
-  npm run migration:run
+  echo "==> DB_RESET=true — running full schema init..."
+  node scripts/init-db.cjs
 fi
 
 echo "==> Starting application..."

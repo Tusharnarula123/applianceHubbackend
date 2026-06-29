@@ -17,8 +17,12 @@ for i in $(seq 1 15); do
   sleep 3
 done
 
-echo "==> Running database migrations..."
-npm run migration:run
+if [ "$DB_SYNC" = "true" ]; then
+  echo "==> DB_SYNC=true — skipping migrations, TypeORM will auto-sync schema"
+else
+  echo "==> Running database migrations..."
+  npm run migration:run
+fi
 
 echo "==> Starting application..."
 exec node dist/main.js

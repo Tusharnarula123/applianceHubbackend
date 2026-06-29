@@ -17,6 +17,11 @@ for i in $(seq 1 15); do
   sleep 3
 done
 
+if [ "$DB_RESET" = "true" ]; then
+  echo "==> DB_RESET=true — dropping all tables for clean TypeORM sync..."
+  node scripts/drop-all-tables.js
+fi
+
 if [ "$DB_SYNC" = "true" ]; then
   echo "==> DB_SYNC=true — skipping migrations, TypeORM will auto-sync schema"
 else

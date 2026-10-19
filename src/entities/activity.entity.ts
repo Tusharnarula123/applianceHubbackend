@@ -11,11 +11,9 @@ export class ActivityEntity {
   id: string;
 
   @Column('varchar', { length: 36 })
-  @ForeignKey((business: any) => BusinessEntity)
   business_id: string;
 
   @Column('varchar', { length: 36, nullable: true })
-  @ForeignKey((appliance: any) => ApplianceEntity)
   appliance_id: string;
 
   @Column('enum', { enum: ['claim', 'scan', 'resolve', 'upload'] })

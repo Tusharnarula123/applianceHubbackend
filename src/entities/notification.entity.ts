@@ -11,15 +11,12 @@ export class NotificationEntity {
   id: string;
 
   @Column('varchar', { length: 36 })
-  @ForeignKey((business: any) => BusinessEntity)
   business_id: string;
 
   @Column('varchar', { length: 36, nullable: true })
-  @ForeignKey((claim: any) => ClaimEntity)
   claim_id: string;
 
   @Column('varchar', { length: 36, nullable: true })
-  @ForeignKey((booking: any) => BookingEntity)
   booking_id: string;
 
   @Column('enum', { enum: ['email', 'sms', 'in_app'] })

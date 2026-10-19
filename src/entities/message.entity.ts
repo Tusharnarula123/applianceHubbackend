@@ -8,7 +8,6 @@ export class MessageEntity {
   id: string;
 
   @Column('varchar', { length: 36 })
-  @ForeignKey((chatSession: any) => ChatSessionEntity)
   chat_session_id: string;
 
   @Column('enum', { enum: ['user', 'assistant'] })

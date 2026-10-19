@@ -11,11 +11,9 @@ export class ChatSessionEntity {
   id: string;
 
   @Column('varchar', { length: 36 })
-  @ForeignKey((appliance: any) => ApplianceEntity)
   appliance_id: string;
 
   @Column('varchar', { length: 36, nullable: true })
-  @ForeignKey((qrCode: any) => QrCodeEntity)
   qr_code_id: string;
 
   @Column('varchar', { length: 255, nullable: true })

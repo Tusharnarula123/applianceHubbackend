@@ -19,7 +19,6 @@ export class DocumentEntity {
   id: string;
 
   @Column('varchar', { length: 36 })
-  @ForeignKey((appliance: any) => ApplianceEntity)
   appliance_id: string;
 
   @Column('varchar', { length: 255 })

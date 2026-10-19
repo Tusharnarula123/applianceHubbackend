@@ -8,7 +8,6 @@ export class UserEntity {
   id: string;
 
   @Column('varchar', { length: 36 })
-  @ForeignKey((business: any) => BusinessEntity)
   business_id: string;
 
   @Column('varchar', { length: 255 })

@@ -13,11 +13,9 @@ export class ClaimEntity {
   id: string;
 
   @Column('varchar', { length: 36 })
-  @ForeignKey((appliance: any) => ApplianceEntity)
   appliance_id: string;
 
   @Column('varchar', { length: 36, nullable: true })
-  @ForeignKey((warrantyRegistration: any) => WarrantyRegistrationEntity)
   warranty_id: string;
 
   @Column('varchar', { length: 255 })

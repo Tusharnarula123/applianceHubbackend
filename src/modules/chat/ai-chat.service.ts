@@ -393,7 +393,7 @@ export class AiChatService {
     private sparePartsService: SparePartsService,
   ) {
     this.openai = new OpenAI({
-      apiKey: this.configService.get<string>('OPENAI_API_KEY'),
+      apiKey: this.configService.get<string>('OPENAI_API_KEY') ?? '',
     });
   }
 

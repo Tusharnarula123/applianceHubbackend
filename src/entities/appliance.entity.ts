@@ -31,7 +31,7 @@ export class ApplianceEntity {
   @Column('varchar', { length: 100 })
   category: string;
 
-  @Column('enum', { enum: ['active', 'training', 'draft'] })
+  @Column('enum', { enum: ['active', 'training', 'draft'], default: 'draft' })
   status: string;
 
   @Column('varchar', { length: 20, default: '#4F46E5' })

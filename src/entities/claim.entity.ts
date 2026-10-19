@@ -39,7 +39,7 @@ export class ClaimEntity {
   @Column('text', { nullable: true })
   resolution_notes: string;
 
-  @Column('timestamp')
+  @Column('timestamp', { default: () => 'CURRENT_TIMESTAMP' })
   filed_at: Date;
 
   @Column('timestamp', { nullable: true })

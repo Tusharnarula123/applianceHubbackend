@@ -19,7 +19,7 @@ export class UserEntity {
   @Column('varchar', { length: 20, nullable: true })
   phone: string;
 
-  @Column('enum', { enum: ['owner', 'editor', 'viewer'] })
+  @Column('enum', { enum: ['owner', 'editor', 'viewer'], default: 'viewer' })
   role: string;
 
   @Column('varchar', { length: 255, nullable: true })

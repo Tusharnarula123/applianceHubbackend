@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+if [ -n "$DB_HOST" ]; then
 echo "==> Waiting for database to be ready..."
 for i in $(seq 1 15); do
   node -e "
@@ -16,6 +17,7 @@ for i in $(seq 1 15); do
   echo "  DB not ready yet (attempt $i/15), retrying in 3s..."
   sleep 3
 done
+fi
 
 if [ "$DB_RESET" = "true" ]; then
   echo "==> DB_RESET=true — running full schema init..."

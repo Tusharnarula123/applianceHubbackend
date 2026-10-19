@@ -19,7 +19,7 @@ export class RepairReviewEntity {
   agent_id: string;
 
   /** 1 – 5 stars */
-  @Column('tinyint', { unsigned: true })
+  @Column('smallint')
   rating: number;
 
   @Column('text', { nullable: true })

@@ -59,10 +59,10 @@ export class RepairRequestEntity {
   })
   status: RepairStatus;
 
-  @Column('datetime', { nullable: true })
+  @Column('timestamp', { nullable: true })
   scheduled_date: Date | null;
 
-  @Column('datetime', { nullable: true })
+  @Column('timestamp', { nullable: true })
   completed_date: Date | null;
 
   /** Repair cost logged by agent or company after job completion */

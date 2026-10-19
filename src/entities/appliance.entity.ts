@@ -59,7 +59,7 @@ export class ApplianceEntity {
   @CreateDateColumn()
   created_at: Date;
 
-  @Column('datetime', { nullable: true })
+  @Column('timestamp', { nullable: true })
   deleted_at: Date | null = null;
 
   // Relations

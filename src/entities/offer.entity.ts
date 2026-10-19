@@ -29,7 +29,7 @@ export class OfferEntity {
   @Column('date')
   valid_until: Date;
 
-  @Column('tinyint', { default: 1 })
+  @Column('boolean', { default: true })
   is_active: boolean;
 
   @Column('int', { default: 0 })

@@ -69,7 +69,7 @@ export class SparePartsService {
       .createQueryBuilder('p')
       .where('p.business_id = :bid', { bid: appliance.business_id })
       .andWhere('(p.appliance_id = :aid OR p.appliance_id IS NULL)', { aid: applianceId })
-      .andWhere('p.is_available = 1')
+      .andWhere('p.is_available = :avail', { avail: true })
       .orderBy('p.category', 'ASC')
       .addOrderBy('p.name', 'ASC')
       .getMany();

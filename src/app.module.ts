@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { TypeOrmModule, TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { CacheModule } from '@nestjs/cache-manager';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { redisStore } from 'cache-manager-redis-yet';
@@ -84,7 +84,7 @@ const __dirname = dirname(__filename);
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        type: 'mysql',
+        type: config.get<'mysql' | 'postgres'>('database.type') ?? 'mysql',
         host: config.get('database.host'),
         port: config.get<number>('database.port'),
         username: config.get('database.username'),
@@ -93,9 +93,11 @@ const __dirname = dirname(__filename);
         // Single entities dir only — avoid stale duplicate metadata from dist/src/
         entities: [join(__dirname, 'entities', '*.entity.{ts,js}')],
         migrations: [join(__dirname, 'database', 'migrations', '*.{ts,js}')],
-        synchronize: false,
+        // Postgres (Render) has no SQL migrations — schema is built from entities when DB_SYNC=true
+        synchronize: process.env.DB_SYNC === 'true',
+        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
         logging: process.env.NODE_ENV !== 'production',
-      }),
+      }) as TypeOrmModuleOptions,
     }),
     // Feature Modules
     AuthModule,

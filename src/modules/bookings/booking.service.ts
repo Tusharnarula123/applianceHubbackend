@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { BookingEntity } from '../../entities/booking.entity.js';
 import { CacheService } from '../../common/cache.service.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -54,7 +54,7 @@ export class BookingService {
   async getUpcomingBookings(limit: number = 50) {
     // Batch load upcoming bookings
     return this.bookingRepository.find({
-      where: { status: 'scheduled' },
+      where: { status: In(['pending', 'confirmed']) },
       relations: ['appliance', 'claim'],
       order: { preferred_date: 'ASC' },
       take: limit,

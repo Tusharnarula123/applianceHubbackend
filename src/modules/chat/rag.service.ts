@@ -96,7 +96,7 @@ export class RagService implements OnModuleInit {
     private storageService: StorageService,
   ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
-    this.openai = new OpenAI({ apiKey: apiKey ?? '' });
+    this.openai = new OpenAI({ apiKey: apiKey || 'not-configured' });
     if (!apiKey?.trim()) {
       this.logger.warn(
         'OPENAI_API_KEY is missing — PDF embedding and AI chat RAG will not work until it is set in .env',

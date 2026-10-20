@@ -566,9 +566,11 @@ export class KnowledgeService implements OnModuleInit {
     const render = (pages: typeof ocrPages) =>
       pages
         .map((p) =>
-          this.budget.verifyWithTextLayer
-            ? `=== PAGE ${p.page} (OCR) ===\n${p.ocr}\n=== PAGE ${p.page} (PDF text layer) ===\n${p.text_layer}`
-            : `=== PAGE ${p.page} (OCR) ===\n${p.ocr}`,
+          !p.ocr
+            ? `=== PAGE ${p.page} (PDF text layer — OCR unavailable for this page) ===\n${p.text_layer}`
+            : this.budget.verifyWithTextLayer
+              ? `=== PAGE ${p.page} (OCR) ===\n${p.ocr}\n=== PAGE ${p.page} (PDF text layer) ===\n${p.text_layer}`
+              : `=== PAGE ${p.page} (OCR) ===\n${p.ocr}`,
         )
         .join('\n\n');
     const full = render(ocrPages);
@@ -583,7 +585,10 @@ export class KnowledgeService implements OnModuleInit {
     ocrPages: Array<{ page: number; ocr: string; text_layer: string }>,
   ): T[][] {
     const pageChars = new Map(
-      ocrPages.map((p) => [p.page, p.ocr.length + (this.budget.verifyWithTextLayer ? p.text_layer.length : 0) + 40]),
+      ocrPages.map((p) => [
+        p.page,
+        (p.ocr ? p.ocr.length + (this.budget.verifyWithTextLayer ? p.text_layer.length : 0) : p.text_layer.length) + 60,
+      ]),
     );
     const refSize = (pages: Set<number>) => [...pages].reduce((n, pg) => n + (pageChars.get(pg) ?? 0), 0);
     const near = (pages: number[]) => pages.flatMap((n) => [n - 1, n, n + 1]);
@@ -687,12 +692,22 @@ export class KnowledgeService implements OnModuleInit {
       .sort((a, b) => a.page - b.page);
   }
 
+  /**
+   * OCR one page. Runs single-threaded at lowest priority so the API stays responsive on a small
+   * instance. A page that still fails returns '' and verification falls back to the PDF text layer.
+   */
   private async ocrImage(file: string): Promise<string> {
-    const { stdout } = await execFileAsync('tesseract', [file, 'stdout', '-l', 'eng', '--psm', '3'], {
-      timeout: 3 * 60_000,
-      maxBuffer: 20 * 1024 * 1024,
-    });
-    return stdout.trim();
+    try {
+      const { stdout } = await execFileAsync('nice', ['-n', '19', 'tesseract', file, 'stdout', '-l', 'eng', '--psm', '3'], {
+        timeout: 10 * 60_000,
+        maxBuffer: 20 * 1024 * 1024,
+        env: { ...process.env, OMP_THREAD_LIMIT: '1' },
+      });
+      return stdout.trim();
+    } catch (err) {
+      this.logger.warn(`OCR failed for ${path.basename(file)}: ${err instanceof Error ? err.message.split('\n')[0] : err}`);
+      return '';
+    }
   }
 
   private async textLayer(pdfPath: string, page: number): Promise<string> {

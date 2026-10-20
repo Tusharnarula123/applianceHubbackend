@@ -19,3 +19,4 @@ export { MessageEntity } from './message.entity.js';
 export { NotificationEntity } from './notification.entity.js';
 export { ActivityEntity } from './activity.entity.js';
 export { OfferEntity } from './offer.entity.js';
+export { DocumentKnowledgeEntity } from './document-knowledge.entity.js';

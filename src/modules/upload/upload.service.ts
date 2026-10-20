@@ -6,6 +6,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import type { File as MulterFile } from 'multer';
 import { RagService } from '../chat/rag.service.js';
+import { KnowledgeService } from '../chat/knowledge.service.js';
 import { CacheService } from '../../common/cache.service.js';
 import { ActivityService } from '../activities/activity.service.js';
 import { StorageService } from '../../common/storage.service.js';
@@ -53,6 +54,7 @@ export class UploadService {
     @InjectRepository(ApplianceEntity)
     private applianceRepository: Repository<ApplianceEntity>,
     private ragService: RagService,
+    private knowledgeService: KnowledgeService,
     private cacheService: CacheService,
     private activityService: ActivityService,
     private storageService: StorageService,
@@ -120,6 +122,8 @@ export class UploadService {
         embedding_status: 'processing',
       });
       this.scheduleEmbeddingForAppliance(savedDocument.id, applianceId);
+      // AI scan → OCR → generate instructions → cross-verify against OCR
+      this.knowledgeService.schedule(savedDocument.id);
       return {
         id: savedDocument.id,
         name: savedDocument.name,

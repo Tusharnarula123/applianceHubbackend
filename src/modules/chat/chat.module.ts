@@ -10,6 +10,7 @@ import { BookingEntity } from '../../entities/booking.entity.js';
 import { QrCodeEntity } from '../../entities/qr-code.entity.js';
 import { DocumentEntity } from '../../entities/document.entity.js';
 import { DocumentChunkEntity } from '../../entities/document-chunk.entity.js';
+import { DocumentKnowledgeEntity } from '../../entities/document-knowledge.entity.js';
 import { RepairAgentEntity } from '../../entities/repair-agent.entity.js';
 import { RepairRequestEntity } from '../../entities/repair-request.entity.js';
 import { RepairReviewEntity } from '../../entities/repair-review.entity.js';
@@ -20,6 +21,8 @@ import { ChatService } from './chat.service.js';
 import { AiChatController } from './ai-chat.controller.js';
 import { AiChatService } from './ai-chat.service.js';
 import { RagService } from './rag.service.js';
+import { KnowledgeService } from './knowledge.service.js';
+import { KnowledgeController } from './knowledge.controller.js';
 import { CacheService } from '../../common/cache.service.js';
 import { StorageService } from '../../common/storage.service.js';
 import { ActivityModule } from '../activities/activity.module.js';
@@ -41,6 +44,7 @@ import { RepairNotificationService } from '../repair/notification.service.js';
       QrCodeEntity,
       DocumentEntity,
       DocumentChunkEntity,
+      DocumentKnowledgeEntity,
       RepairAgentEntity,
       RepairRequestEntity,
       RepairReviewEntity,
@@ -48,17 +52,18 @@ import { RepairNotificationService } from '../repair/notification.service.js';
       PartsOrderEntity,
     ]),
   ],
-  controllers: [ChatController, AiChatController],
+  controllers: [ChatController, AiChatController, KnowledgeController],
   providers: [
     ChatService,
     AiChatService,
     RagService,
+    KnowledgeService,
     CacheService,
     StorageService,
     RepairService,
     SparePartsService,
     RepairNotificationService,
   ],
-  exports: [ChatService, AiChatService, RagService],
+  exports: [ChatService, AiChatService, RagService, KnowledgeService],
 })
 export class ChatModule {}

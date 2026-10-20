@@ -3,6 +3,9 @@ FROM node:20-slim
 # Install Chromium + its shared library dependencies for Puppeteer PDF generation
 RUN apt-get update && apt-get install -y \
     chromium \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     fonts-liberation \
     libappindicator3-1 \
     libasound2 \

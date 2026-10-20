@@ -146,6 +146,28 @@ async function init() {
   `);
 
   await conn.query(`
+    CREATE TABLE \`document_knowledge\` (
+      \`document_id\`    VARCHAR(36)  NOT NULL,
+      \`appliance_id\`   VARCHAR(36)  NOT NULL,
+      \`status\`         VARCHAR(20)  NOT NULL DEFAULT 'pending',
+      \`stage_detail\`   VARCHAR(255) NULL,
+      \`error\`          TEXT         NULL,
+      \`page_count\`     INT          NOT NULL DEFAULT 0,
+      \`ocr_pages\`      JSON         NULL,
+      \`ai_scan\`        JSON         NULL,
+      \`summary\`        TEXT         NULL,
+      \`items\`          JSON         NULL,
+      \`stats\`          JSON         NULL,
+      \`model\`          VARCHAR(50)  NULL,
+      \`created_at\`     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      \`updated_at\`     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (\`document_id\`),
+      INDEX \`IDX_knowledge_appliance\` (\`appliance_id\`),
+      CONSTRAINT \`FK_knowledge_document\` FOREIGN KEY (\`document_id\`) REFERENCES \`documents\`(\`id\`) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  await conn.query(`
     CREATE TABLE \`warranty_registrations\` (
       \`id\`              VARCHAR(36)  NOT NULL DEFAULT (UUID()),
       \`appliance_id\`    VARCHAR(36)  NOT NULL,

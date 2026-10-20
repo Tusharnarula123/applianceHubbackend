@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -13,6 +13,7 @@ import { ClaimEntity } from '../../entities/claim.entity.js';
 import { BookingEntity } from '../../entities/booking.entity.js';
 import { QrCodeEntity } from '../../entities/qr-code.entity.js';
 import { RagService } from './rag.service.js';
+import { KnowledgeService } from './knowledge.service.js';
 import { CacheService } from '../../common/cache.service.js';
 import { ActivityService } from '../activities/activity.service.js';
 import { resolveClaimWarrantyId } from '../../common/resolve-claim-warranty.js';
@@ -387,6 +388,7 @@ export class AiChatService {
     private qrCodeRepo: Repository<QrCodeEntity>,
     private configService: ConfigService,
     private ragService: RagService,
+    private knowledgeService: KnowledgeService,
     private cacheService: CacheService,
     private activityService: ActivityService,
     private repairService: RepairService,
@@ -519,6 +521,12 @@ export class AiChatService {
 
     const appliance = session.appliance as ApplianceEntity;
 
+    if (!this.configService.get<string>('OPENAI_API_KEY')) {
+      throw new ServiceUnavailableException(
+        'The AI assistant is not configured yet (OPENAI_API_KEY is missing on the server).',
+      );
+    }
+
     // 2. Save the user message to DB
     await this.messageRepo.save(
       this.messageRepo.create({
@@ -537,7 +545,9 @@ export class AiChatService {
 
     // 4. Retrieve RAG context from indexed PDFs (document_chunks)
     const rag = await this.ragService.retrieveContextWithMeta(userMessage, appliance.id);
-    const ragContext = rag.context;
+    // Verified knowledge (AI scan → OCR → generated guides → cross-verified) comes first
+    const verified = await this.knowledgeService.getVerifiedContext(appliance.id);
+    const ragContext = verified + (rag.context ?? '');
 
     // 5. Build OpenAI messages array
     const systemPrompt = this.buildSystemPrompt(appliance, customerContext, ragContext);

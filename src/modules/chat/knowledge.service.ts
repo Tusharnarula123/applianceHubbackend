@@ -33,14 +33,38 @@ const ITEM_TYPES = [
   'faq',
 ] as const;
 
-/** Pages sent to the vision model per request (Groq allows at most 5 images) */
-const SCAN_BATCH = 4;
 /** Keep each vision request under provider size limits (Groq: ~4MB of base64 per request) */
 const SCAN_BATCH_BYTES = 2_500_000;
-/** Items sent to the verifier per request */
-const VERIFY_BATCH = 30;
-/** Max characters of OCR text given to the verifier in one request */
-const VERIFY_REF_CHARS = 120_000;
+
+/**
+ * Per-request sizes. Groq's free tier allows 8,000 tokens per minute and rejects any single
+ * request (prompt + max_tokens) above that, so work is split into small page windows there.
+ */
+interface Budget {
+  scanBatch: number;
+  scanMaxTokens: number;
+  genWindowChars: number;
+  genMaxTokens: number;
+  verifyBatch: number;
+  verifyRefChars: number;
+  verifyMaxTokens: number;
+  /** Include the PDF text layer next to OCR in the verifier prompt */
+  verifyWithTextLayer: boolean;
+}
+const BUDGETS: Record<'groq' | 'openai', Budget> = {
+  groq: {
+    scanBatch: 2, scanMaxTokens: 3000,
+    genWindowChars: 6000, genMaxTokens: 3500,
+    verifyBatch: 10, verifyRefChars: 6000, verifyMaxTokens: 3000,
+    verifyWithTextLayer: false,
+  },
+  openai: {
+    scanBatch: 4, scanMaxTokens: 8000,
+    genWindowChars: 60000, genMaxTokens: 16000,
+    verifyBatch: 30, verifyRefChars: 120000, verifyMaxTokens: 8000,
+    verifyWithTextLayer: true,
+  },
+};
 /** Max characters of verified knowledge injected into the chat system prompt */
 const CHAT_CONTEXT_CHARS = 12_000;
 
@@ -85,11 +109,15 @@ Return JSON: {"results":[{"id":"<item id>","verdict":"...","corrected_data":{...
 
 type RawItem = { type: string; data: Record<string, any>; pages: number[] };
 
+/** Model output was not valid JSON — usually cut off at max_tokens */
+class InvalidJsonError extends Error {}
+
 @Injectable()
 export class KnowledgeService implements OnModuleInit {
   private readonly logger = new Logger(KnowledgeService.name);
   private readonly openai: OpenAI;
   private readonly ai: AiConfig;
+  private readonly budget: Budget;
   private readonly hasKey: boolean;
   private readonly model: string;
   private readonly maxPages: number;
@@ -107,7 +135,9 @@ export class KnowledgeService implements OnModuleInit {
   ) {
     this.ai = resolveAiConfig(this.configService);
     this.hasKey = !!this.ai.apiKey;
-    this.openai = new OpenAI({ apiKey: this.ai.apiKey || 'not-configured', baseURL: this.ai.baseURL });
+    this.budget = BUDGETS[this.ai.provider];
+    // Generous retries: the SDK waits for retry-after on 429 (per-minute token limits)
+    this.openai = new OpenAI({ apiKey: this.ai.apiKey || 'not-configured', baseURL: this.ai.baseURL, maxRetries: 10 });
     this.model = this.ai.chatModel;
     this.maxPages = parseInt(this.configService.get<string>('KNOWLEDGE_MAX_PAGES') || '40', 10);
   }
@@ -308,7 +338,7 @@ export class KnowledgeService implements OnModuleInit {
     let bytes = 0;
     for (const img of images) {
       const size = Math.ceil(((await fs.stat(img.scanFile)).size * 4) / 3);
-      if (current.length && (current.length >= SCAN_BATCH || bytes + size > SCAN_BATCH_BYTES)) {
+      if (current.length && (current.length >= this.budget.scanBatch || bytes + size > SCAN_BATCH_BYTES)) {
         batches.push(current);
         current = [];
         bytes = 0;
@@ -340,7 +370,7 @@ export class KnowledgeService implements OnModuleInit {
         { role: 'system', content: SCAN_PROMPT },
         { role: 'user', content },
       ],
-      8000,
+      this.budget.scanMaxTokens,
       this.ai.visionModel,
     );
     const pages: Array<{ page: number; content: string }> = Array.isArray(json.pages) ? json.pages : [];
@@ -351,15 +381,58 @@ export class KnowledgeService implements OnModuleInit {
     }));
   }
 
+  /** Generate items window by window so every request fits the provider budget. */
   private async generate(aiScan: Array<{ page: number; content: string }>, docName: string) {
-    const manual = aiScan.map((p) => `=== PAGE ${p.page} ===\n${p.content}`).join('\n\n');
-    const json = await this.completeJson(
-      [
-        { role: 'system', content: GENERATE_PROMPT },
-        { role: 'user', content: `Manual: ${docName}\n\n${manual}` },
-      ],
-      16000,
-    );
+    const windows: Array<typeof aiScan> = [];
+    let current: typeof aiScan = [];
+    let chars = 0;
+    for (const p of aiScan) {
+      if (current.length && chars + p.content.length > this.budget.genWindowChars) {
+        windows.push(current);
+        current = [];
+        chars = 0;
+      }
+      current.push(p);
+      chars += p.content.length;
+    }
+    if (current.length) windows.push(current);
+
+    let summary: string | null = null;
+    const items: RawItem[] = [];
+    for (const w of windows) {
+      const out = await this.generateWindow(w, docName);
+      summary ??= out.summary;
+      items.push(...out.items);
+    }
+    return { summary, items };
+  }
+
+  /** One generation request; if the output is cut off, split the window in half and retry. */
+  private async generateWindow(
+    pages: Array<{ page: number; content: string }>,
+    docName: string,
+  ): Promise<{ summary: string | null; items: RawItem[] }> {
+    const manual = pages.map((p) => `=== PAGE ${p.page} ===\n${p.content}`).join('\n\n');
+    let json: any;
+    try {
+      json = await this.completeJson(
+        [
+          { role: 'system', content: GENERATE_PROMPT },
+          { role: 'user', content: `Manual: ${docName}\n\n${manual}` },
+        ],
+        this.budget.genMaxTokens,
+      );
+    } catch (err) {
+      if (!(err instanceof InvalidJsonError)) throw err;
+      if (pages.length > 1) {
+        const mid = Math.ceil(pages.length / 2);
+        const first = await this.generateWindow(pages.slice(0, mid), docName);
+        const second = await this.generateWindow(pages.slice(mid), docName);
+        return { summary: first.summary ?? second.summary, items: [...first.items, ...second.items] };
+      }
+      this.logger.warn(`Generation output cut off for page ${pages[0]?.page}; skipping that page`);
+      return { summary: null, items: [] };
+    }
     const items: RawItem[] = (Array.isArray(json.items) ? json.items : [])
       .filter((i: any) => i && (ITEM_TYPES as readonly string[]).includes(i.type) && i.data && typeof i.data === 'object')
       .map((i: any) => ({
@@ -377,8 +450,7 @@ export class KnowledgeService implements OnModuleInit {
     const items = raw.map((r, idx) => ({ ...r, id: `${r.type}-${idx}` }));
     const verdicts = new Map<string, any>();
 
-    for (let i = 0; i < items.length; i += VERIFY_BATCH) {
-      const batch = items.slice(i, i + VERIFY_BATCH);
+    for (const batch of this.verifyBatches(items, ocrPages)) {
       const reference = this.referenceText(ocrPages, batch.flatMap((b) => b.pages));
       const json = await this.completeJson(
         [
@@ -390,8 +462,12 @@ export class KnowledgeService implements OnModuleInit {
               JSON.stringify(batch.map((b) => ({ id: b.id, type: b.type, data: b.data, pages: b.pages }))),
           },
         ],
-        8000,
-      );
+        this.budget.verifyMaxTokens,
+      ).catch((err) => {
+        // A failed batch leaves its items unverified instead of failing the whole document
+        this.logger.warn(`Verification batch failed: ${err instanceof Error ? err.message : err}`);
+        return { results: [] };
+      });
       for (const r of Array.isArray(json.results) ? json.results : []) {
         if (r?.id) verdicts.set(String(r.id), r);
       }
@@ -475,15 +551,50 @@ export class KnowledgeService implements OnModuleInit {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  /** OCR text of the cited pages (±1), or the whole document when it fits the budget. */
   private referenceText(ocrPages: Array<{ page: number; ocr: string; text_layer: string }>, cited: number[]) {
     const render = (pages: typeof ocrPages) =>
       pages
-        .map((p) => `=== PAGE ${p.page} (OCR) ===\n${p.ocr}\n=== PAGE ${p.page} (PDF text layer) ===\n${p.text_layer}`)
+        .map((p) =>
+          this.budget.verifyWithTextLayer
+            ? `=== PAGE ${p.page} (OCR) ===\n${p.ocr}\n=== PAGE ${p.page} (PDF text layer) ===\n${p.text_layer}`
+            : `=== PAGE ${p.page} (OCR) ===\n${p.ocr}`,
+        )
         .join('\n\n');
     const full = render(ocrPages);
-    if (full.length <= VERIFY_REF_CHARS) return full;
-    const wanted = ocrPages.filter((p) => cited.some((n) => Math.abs(n - p.page) <= 1));
-    return render(wanted).slice(0, VERIFY_REF_CHARS);
+    if (full.length <= this.budget.verifyRefChars) return full;
+    const wanted = cited.length ? ocrPages.filter((p) => cited.some((n) => Math.abs(n - p.page) <= 1)) : ocrPages;
+    return render(wanted).slice(0, this.budget.verifyRefChars);
+  }
+
+  /** Batch items (sorted by page) so each batch's OCR reference stays within the budget. */
+  private verifyBatches<T extends { pages: number[] }>(
+    items: T[],
+    ocrPages: Array<{ page: number; ocr: string; text_layer: string }>,
+  ): T[][] {
+    const pageChars = new Map(
+      ocrPages.map((p) => [p.page, p.ocr.length + (this.budget.verifyWithTextLayer ? p.text_layer.length : 0) + 40]),
+    );
+    const refSize = (pages: Set<number>) => [...pages].reduce((n, pg) => n + (pageChars.get(pg) ?? 0), 0);
+    const near = (pages: number[]) => pages.flatMap((n) => [n - 1, n, n + 1]);
+
+    const sorted = [...items].sort((x, y) => (x.pages[0] ?? 0) - (y.pages[0] ?? 0));
+    const batches: T[][] = [];
+    let current: T[] = [];
+    let pages = new Set<number>();
+    for (const item of sorted) {
+      const next = new Set([...pages, ...near(item.pages)]);
+      if (current.length && (current.length >= this.budget.verifyBatch || refSize(next) > this.budget.verifyRefChars)) {
+        batches.push(current);
+        current = [];
+        pages = new Set(near(item.pages));
+      } else {
+        pages = next;
+      }
+      current.push(item);
+    }
+    if (current.length) batches.push(current);
+    return batches;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -520,13 +631,13 @@ export class KnowledgeService implements OnModuleInit {
       max_tokens: maxTokens,
       response_format: { type: 'json_object' },
       // gpt-oss on Groq is a reasoning model; reasoning tokens count toward max_tokens
-      ...(model.startsWith('openai/gpt-oss') ? { reasoning_effort: 'medium' as const } : {}),
+      ...(model.startsWith('openai/gpt-oss') ? { reasoning_effort: 'low' as const } : {}),
     });
     const text = res.choices[0]?.message?.content ?? '{}';
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(`Model returned invalid JSON (finish_reason=${res.choices[0]?.finish_reason})`);
+      throw new InvalidJsonError(`Model returned invalid JSON (finish_reason=${res.choices[0]?.finish_reason})`);
     }
   }
 

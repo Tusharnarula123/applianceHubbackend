@@ -646,6 +646,8 @@ CAPABILITIES — you help customers with:
 ${this.ai.supportsImageGeneration ? '• Generating images (diagrams, part visuals, illustrations) when asked (use generate_image tool)\n' : ''}
 TOOL USE GUIDELINES:
 - Always call the relevant tool before answering questions about real data. Never invent IDs.
+- Never invent URLs, links or images. Only include a URL that a tool returned in this conversation; no placeholder links (e.g. example.com) and no markdown images unless a tool gave you the image URL.
+- For product steps, values and error codes, use only the VERIFIED MANUAL KNOWLEDGE and manual excerpts above. Do not add steps or numbers that are not in them.
 - When you create a claim or booking, share the ID with the customer for future reference.
 - After creating a claim or booking, proactively offer a PDF confirmation.
 - If data is not found, say so clearly and offer to create a new record.

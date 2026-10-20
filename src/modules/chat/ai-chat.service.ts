@@ -14,6 +14,7 @@ import { BookingEntity } from '../../entities/booking.entity.js';
 import { QrCodeEntity } from '../../entities/qr-code.entity.js';
 import { RagService } from './rag.service.js';
 import { KnowledgeService } from './knowledge.service.js';
+import { resolveAiConfig, type AiConfig } from '../../common/ai-config.js';
 import { CacheService } from '../../common/cache.service.js';
 import { ActivityService } from '../activities/activity.service.js';
 import { resolveClaimWarrantyId } from '../../common/resolve-claim-warranty.js';
@@ -370,6 +371,7 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
 export class AiChatService {
   private readonly logger = new Logger(AiChatService.name);
   private openai: OpenAI;
+  private readonly ai: AiConfig;
 
   constructor(
     @InjectRepository(ApplianceEntity)
@@ -394,9 +396,8 @@ export class AiChatService {
     private repairService: RepairService,
     private sparePartsService: SparePartsService,
   ) {
-    this.openai = new OpenAI({
-      apiKey: this.configService.get<string>('OPENAI_API_KEY') || 'not-configured',
-    });
+    this.ai = resolveAiConfig(this.configService);
+    this.openai = new OpenAI({ apiKey: this.ai.apiKey || 'not-configured', baseURL: this.ai.baseURL });
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -521,9 +522,9 @@ export class AiChatService {
 
     const appliance = session.appliance as ApplianceEntity;
 
-    if (!this.configService.get<string>('OPENAI_API_KEY')) {
+    if (!this.ai.apiKey) {
       throw new ServiceUnavailableException(
-        'The AI assistant is not configured yet (OPENAI_API_KEY is missing on the server).',
+        'The AI assistant is not configured yet (no GROQ_API_KEY or OPENAI_API_KEY on the server).',
       );
     }
 
@@ -642,8 +643,7 @@ CAPABILITIES — you help customers with:
 • Scheduling and managing service bookings
 • General product information, appliance details, and troubleshooting
 • Searching YouTube for tutorial videos (use search_youtube tool)
-• Generating images (diagrams, part visuals, illustrations) when asked (use generate_image tool)
-
+${this.ai.supportsImageGeneration ? '• Generating images (diagrams, part visuals, illustrations) when asked (use generate_image tool)\n' : ''}
 TOOL USE GUIDELINES:
 - Always call the relevant tool before answering questions about real data. Never invent IDs.
 - When you create a claim or booking, share the ID with the customer for future reference.
@@ -702,12 +702,15 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
       round++;
 
       const completion = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: this.ai.chatModel,
         messages: currentMessages,
-        tools: CHATBOT_TOOLS,
+        tools: this.ai.supportsImageGeneration
+          ? CHATBOT_TOOLS
+          : CHATBOT_TOOLS.filter((t) => !('function' in t) || t.function.name !== 'generate_image'),
         tool_choice: 'auto',
         temperature: 0.4,
-        max_tokens: 2048,
+        // gpt-oss on Groq is a reasoning model; reasoning tokens count toward max_tokens
+        max_tokens: this.ai.chatModel.startsWith('openai/gpt-oss') ? 8192 : 2048,
       });
 
       const choice = completion.choices[0];

@@ -18,6 +18,7 @@ import {
 } from '../../entities/document-knowledge.entity.js';
 import { StorageService } from '../../common/storage.service.js';
 import { resolveDocumentFilePath } from '../../common/uploads-path.js';
+import { resolveAiConfig, type AiConfig } from '../../common/ai-config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -32,8 +33,10 @@ const ITEM_TYPES = [
   'faq',
 ] as const;
 
-/** Pages sent to the vision model per request */
+/** Pages sent to the vision model per request (Groq allows at most 5 images) */
 const SCAN_BATCH = 4;
+/** Keep each vision request under provider size limits (Groq: ~4MB of base64 per request) */
+const SCAN_BATCH_BYTES = 2_500_000;
 /** Items sent to the verifier per request */
 const VERIFY_BATCH = 30;
 /** Max characters of OCR text given to the verifier in one request */
@@ -86,6 +89,7 @@ type RawItem = { type: string; data: Record<string, any>; pages: number[] };
 export class KnowledgeService implements OnModuleInit {
   private readonly logger = new Logger(KnowledgeService.name);
   private readonly openai: OpenAI;
+  private readonly ai: AiConfig;
   private readonly hasKey: boolean;
   private readonly model: string;
   private readonly maxPages: number;
@@ -101,10 +105,10 @@ export class KnowledgeService implements OnModuleInit {
     private readonly storageService: StorageService,
     private readonly configService: ConfigService,
   ) {
-    const apiKey = this.configService.get<string>('OPENAI_API_KEY');
-    this.hasKey = !!apiKey;
-    this.openai = new OpenAI({ apiKey: apiKey || 'not-configured' });
-    this.model = this.configService.get<string>('OPENAI_MODEL') || 'gpt-4o';
+    this.ai = resolveAiConfig(this.configService);
+    this.hasKey = !!this.ai.apiKey;
+    this.openai = new OpenAI({ apiKey: this.ai.apiKey || 'not-configured', baseURL: this.ai.baseURL });
+    this.model = this.ai.chatModel;
     this.maxPages = parseInt(this.configService.get<string>('KNOWLEDGE_MAX_PAGES') || '40', 10);
   }
 
@@ -218,11 +222,16 @@ export class KnowledgeService implements OnModuleInit {
     const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scana-kb-'));
     try {
       if (!this.hasKey) {
-        throw new Error('OPENAI_API_KEY is not configured — add it in the backend environment, then click Rebuild.');
+        throw new Error('No AI key configured — set GROQ_API_KEY (or OPENAI_API_KEY) in the backend environment, then click Rebuild.');
       }
 
       // 0. Load PDF and render pages to images
-      await this.upsert(doc, { status: 'scanning', stage_detail: 'Preparing pages', error: null, model: this.model });
+      await this.upsert(doc, {
+        status: 'scanning',
+        stage_detail: 'Preparing pages',
+        error: null,
+        model: `${this.ai.visionModel} + ${this.ai.chatModel}`.slice(0, 50),
+      });
       const pdfPath = path.join(workDir, 'source.pdf');
       await fs.writeFile(pdfPath, await this.loadPdf(doc.file_url));
       const totalPages = await this.pageCount(pdfPath);
@@ -233,8 +242,7 @@ export class KnowledgeService implements OnModuleInit {
 
       // 1. AI scan — vision model transcribes every page
       const aiScan: Array<{ page: number; content: string }> = [];
-      for (let i = 0; i < images.length; i += SCAN_BATCH) {
-        const batch = images.slice(i, i + SCAN_BATCH);
+      for (const batch of await this.scanBatches(images)) {
         await this.upsert(doc, {
           status: 'scanning',
           stage_detail: `AI scanning pages ${batch[0].page}–${batch[batch.length - 1].page} of ${pageCount}`,
@@ -293,14 +301,39 @@ export class KnowledgeService implements OnModuleInit {
     }
   }
 
-  private async scanPages(batch: Array<{ page: number; file: string }>) {
+  /** Group pages into vision requests by count and payload size */
+  private async scanBatches(images: Array<{ page: number; file: string; scanFile: string }>) {
+    const batches: Array<typeof images> = [];
+    let current: typeof images = [];
+    let bytes = 0;
+    for (const img of images) {
+      const size = Math.ceil(((await fs.stat(img.scanFile)).size * 4) / 3);
+      if (current.length && (current.length >= SCAN_BATCH || bytes + size > SCAN_BATCH_BYTES)) {
+        batches.push(current);
+        current = [];
+        bytes = 0;
+      }
+      current.push(img);
+      bytes += size;
+    }
+    if (current.length) batches.push(current);
+    return batches;
+  }
+
+  private async scanPages(batch: Array<{ page: number; file: string; scanFile: string }>) {
     const content: OpenAI.Chat.ChatCompletionContentPart[] = [
       { type: 'text', text: `Pages ${batch.map((b) => b.page).join(', ')} follow, in order.` },
     ];
     for (const b of batch) {
       content.push({ type: 'text', text: `Page ${b.page}:` });
-      const base64 = (await fs.readFile(b.file)).toString('base64');
-      content.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${base64}`, detail: 'high' } });
+      const base64 = (await fs.readFile(b.scanFile)).toString('base64');
+      content.push({
+        type: 'image_url',
+        image_url:
+          this.ai.provider === 'openai'
+            ? { url: `data:image/jpeg;base64,${base64}`, detail: 'high' }
+            : { url: `data:image/jpeg;base64,${base64}` },
+      });
     }
     const json = await this.completeJson(
       [
@@ -308,6 +341,7 @@ export class KnowledgeService implements OnModuleInit {
         { role: 'user', content },
       ],
       8000,
+      this.ai.visionModel,
     );
     const pages: Array<{ page: number; content: string }> = Array.isArray(json.pages) ? json.pages : [];
     // Guarantee one entry per requested page, in order
@@ -324,7 +358,7 @@ export class KnowledgeService implements OnModuleInit {
         { role: 'system', content: GENERATE_PROMPT },
         { role: 'user', content: `Manual: ${docName}\n\n${manual}` },
       ],
-      12000,
+      16000,
     );
     const items: RawItem[] = (Array.isArray(json.items) ? json.items : [])
       .filter((i: any) => i && (ITEM_TYPES as readonly string[]).includes(i.type) && i.data && typeof i.data === 'object')
@@ -474,13 +508,19 @@ export class KnowledgeService implements OnModuleInit {
     }
   }
 
-  private async completeJson(messages: OpenAI.Chat.ChatCompletionMessageParam[], maxTokens: number) {
+  private async completeJson(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+    maxTokens: number,
+    model: string = this.model,
+  ) {
     const res = await this.openai.chat.completions.create({
-      model: this.model,
+      model,
       messages,
       temperature: 0,
       max_tokens: maxTokens,
       response_format: { type: 'json_object' },
+      // gpt-oss on Groq is a reasoning model; reasoning tokens count toward max_tokens
+      ...(model.startsWith('openai/gpt-oss') ? { reasoning_effort: 'medium' as const } : {}),
     });
     const text = res.choices[0]?.message?.content ?? '{}';
     try {
@@ -511,9 +551,18 @@ export class KnowledgeService implements OnModuleInit {
     await execFileAsync('pdftoppm', ['-r', '150', '-png', '-f', '1', '-l', String(pageCount), pdfPath, path.join(workDir, 'p')], {
       timeout: 10 * 60_000,
     });
-    const files = (await fs.readdir(workDir)).filter((f) => /^p-\d+\.png$/.test(f));
-    return files
-      .map((f) => ({ page: parseInt(f.match(/\d+/)![0], 10), file: path.join(workDir, f) }))
+    // Smaller JPEGs for the vision model (request size limits); PNGs above stay full quality for OCR
+    await execFileAsync(
+      'pdftoppm',
+      ['-r', '110', '-jpeg', '-jpegopt', 'quality=85', '-f', '1', '-l', String(pageCount), pdfPath, path.join(workDir, 's')],
+      { timeout: 10 * 60_000 },
+    );
+    const all = await fs.readdir(workDir);
+    const pageOf = (f: string) => parseInt(f.match(/-(\d+)\./)![1], 10);
+    const jpgs = new Map(all.filter((f) => /^s-\d+\.jpg$/.test(f)).map((f) => [pageOf(f), path.join(workDir, f)]));
+    return all
+      .filter((f) => /^p-\d+\.png$/.test(f))
+      .map((f) => ({ page: pageOf(f), file: path.join(workDir, f), scanFile: jpgs.get(pageOf(f)) ?? path.join(workDir, f) }))
       .sort((a, b) => a.page - b.page);
   }
 

@@ -33,15 +33,13 @@ const ITEM_TYPES = [
   'faq',
 ] as const;
 
-/** Keep each vision request under provider size limits (Groq: ~4MB of base64 per request) */
-const SCAN_BATCH_BYTES = 2_500_000;
-
 /**
- * Per-request sizes. Groq's free tier allows 8,000 tokens per minute and rejects any single
- * request (prompt + max_tokens) above that, so work is split into small page windows there.
+ * Per-request sizes. Groq's free tier limits tokens per minute (8,000 for gpt-oss; 7,000 input and
+ * only 1,000 OUTPUT tokens for the qwen vision model) and rejects any single request whose expected
+ * size exceeds a limit, so work is split into small pieces there.
  */
 interface Budget {
-  scanBatch: number;
+  /** Max output tokens for one page transcription (must stay under the vision model's output limit) */
   scanMaxTokens: number;
   genWindowChars: number;
   genMaxTokens: number;
@@ -53,13 +51,13 @@ interface Budget {
 }
 const BUDGETS: Record<'groq' | 'openai', Budget> = {
   groq: {
-    scanBatch: 2, scanMaxTokens: 3000,
+    scanMaxTokens: 900,
     genWindowChars: 6000, genMaxTokens: 3500,
     verifyBatch: 10, verifyRefChars: 6000, verifyMaxTokens: 3000,
     verifyWithTextLayer: false,
   },
   openai: {
-    scanBatch: 4, scanMaxTokens: 8000,
+    scanMaxTokens: 6000,
     genWindowChars: 60000, genMaxTokens: 16000,
     verifyBatch: 30, verifyRefChars: 120000, verifyMaxTokens: 8000,
     verifyWithTextLayer: true,
@@ -68,13 +66,13 @@ const BUDGETS: Record<'groq' | 'openai', Budget> = {
 /** Max characters of verified knowledge injected into the chat system prompt */
 const CHAT_CONTEXT_CHARS = 12_000;
 
-const SCAN_PROMPT = `You are scanning pages of an appliance manual.
-For EACH page image, write a faithful transcription in Markdown:
+const SCAN_PROMPT = `You are scanning one page (or part of a page) of an appliance manual.
+Write a faithful transcription in Markdown:
 - Keep headings, numbered steps, bullet lists and table rows exactly as printed.
 - Copy every number, unit, error code, model number and warning word-for-word.
 - Describe diagrams/pictures briefly as [Diagram: ...] including any labels printed on them.
-- Do not summarise, interpret or add anything that is not printed on the page.
-Return JSON: {"pages":[{"page":<page number>,"content":"<markdown>"}]}`;
+- Do not summarise, interpret or add anything that is not printed on the image.
+Reply with the Markdown transcription only — no preamble, no code fences.`;
 
 const GENERATE_PROMPT = `You turn a scanned appliance manual into structured, customer-ready support knowledge.
 Use ONLY information present in the manual text. Never invent steps, numbers, codes or claims.
@@ -272,12 +270,9 @@ export class KnowledgeService implements OnModuleInit {
 
       // 1. AI scan — vision model transcribes every page
       const aiScan: Array<{ page: number; content: string }> = [];
-      for (const batch of await this.scanBatches(images)) {
-        await this.upsert(doc, {
-          status: 'scanning',
-          stage_detail: `AI scanning pages ${batch[0].page}–${batch[batch.length - 1].page} of ${pageCount}`,
-        });
-        aiScan.push(...(await this.scanPages(batch)));
+      for (const img of images) {
+        await this.upsert(doc, { status: 'scanning', stage_detail: `AI scanning page ${img.page} of ${pageCount}` });
+        aiScan.push({ page: img.page, content: await this.scanPage(img, pdfPath, workDir) });
       }
       await this.upsert(doc, { ai_scan: aiScan });
 
@@ -331,54 +326,69 @@ export class KnowledgeService implements OnModuleInit {
     }
   }
 
-  /** Group pages into vision requests by count and payload size */
-  private async scanBatches(images: Array<{ page: number; file: string; scanFile: string }>) {
-    const batches: Array<typeof images> = [];
-    let current: typeof images = [];
-    let bytes = 0;
-    for (const img of images) {
-      const size = Math.ceil(((await fs.stat(img.scanFile)).size * 4) / 3);
-      if (current.length && (current.length >= this.budget.scanBatch || bytes + size > SCAN_BATCH_BYTES)) {
-        batches.push(current);
-        current = [];
-        bytes = 0;
-      }
-      current.push(img);
-      bytes += size;
+  /**
+   * Transcribe one page with the vision model. If the transcription is cut off at the output
+   * limit (dense page), re-scan the page as top and bottom halves and join them.
+   */
+  private async scanPage(img: { page: number; scanFile: string }, pdfPath: string, workDir: string): Promise<string> {
+    const full = await this.scanImage(img.scanFile, `Page ${img.page}:`);
+    if (full.finish !== 'length') return full.text;
+
+    this.logger.log(`Page ${img.page} transcription hit the output limit; scanning it in halves`);
+    const halves = await this.renderHalves(pdfPath, workDir, img.page);
+    const parts: string[] = [];
+    for (const [i, file] of halves.entries()) {
+      const part = await this.scanImage(file, `Page ${img.page}, ${i === 0 ? 'top' : 'bottom'} half:`);
+      if (part.finish === 'length') this.logger.warn(`Page ${img.page} half ${i + 1} still cut off; keeping partial text`);
+      parts.push(part.text);
     }
-    if (current.length) batches.push(current);
-    return batches;
+    return parts.join('\n\n');
   }
 
-  private async scanPages(batch: Array<{ page: number; file: string; scanFile: string }>) {
-    const content: OpenAI.Chat.ChatCompletionContentPart[] = [
-      { type: 'text', text: `Pages ${batch.map((b) => b.page).join(', ')} follow, in order.` },
-    ];
-    for (const b of batch) {
-      content.push({ type: 'text', text: `Page ${b.page}:` });
-      const base64 = (await fs.readFile(b.scanFile)).toString('base64');
-      content.push({
-        type: 'image_url',
-        image_url:
-          this.ai.provider === 'openai'
-            ? { url: `data:image/jpeg;base64,${base64}`, detail: 'high' }
-            : { url: `data:image/jpeg;base64,${base64}` },
-      });
-    }
-    const json = await this.completeJson(
-      [
+  private async scanImage(file: string, label: string) {
+    const base64 = (await fs.readFile(file)).toString('base64');
+    const url = `data:image/jpeg;base64,${base64}`;
+    const res = await this.openai.chat.completions.create({
+      model: this.ai.visionModel,
+      temperature: 0,
+      max_tokens: this.budget.scanMaxTokens,
+      messages: [
         { role: 'system', content: SCAN_PROMPT },
-        { role: 'user', content },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: label },
+            { type: 'image_url', image_url: this.ai.provider === 'openai' ? { url, detail: 'high' } : { url } },
+          ],
+        },
       ],
-      this.budget.scanMaxTokens,
-      this.ai.visionModel,
-    );
-    const pages: Array<{ page: number; content: string }> = Array.isArray(json.pages) ? json.pages : [];
-    // Guarantee one entry per requested page, in order
-    return batch.map((b) => ({
-      page: b.page,
-      content: String(pages.find((p) => Number(p.page) === b.page)?.content ?? ''),
-    }));
+    });
+    const choice = res.choices[0];
+    return { text: (choice?.message?.content ?? '').trim(), finish: choice?.finish_reason };
+  }
+
+  /** Render the top and bottom halves of one page (with a small overlap) for dense pages. */
+  private async renderHalves(pdfPath: string, workDir: string, page: number): Promise<string[]> {
+    const dpi = 110;
+    const { stdout } = await execFileAsync('pdfinfo', ['-f', String(page), '-l', String(page), pdfPath], { timeout: 60_000 });
+    const m = stdout.match(/Page\s+\d+\s+size:\s+([\d.]+)\s+x\s+([\d.]+)/);
+    const w = Math.ceil((m ? parseFloat(m[1]) : 612) * (dpi / 72));
+    const h = Math.ceil((m ? parseFloat(m[2]) : 792) * (dpi / 72));
+    const half = Math.ceil(h / 2);
+    const overlap = 40;
+    const crops = [
+      { y: 0, height: half + overlap, out: path.join(workDir, `half-${page}-top`) },
+      { y: Math.max(0, half - overlap), height: h - half + overlap, out: path.join(workDir, `half-${page}-bottom`) },
+    ];
+    for (const c of crops) {
+      await execFileAsync(
+        'pdftoppm',
+        ['-r', String(dpi), '-jpeg', '-jpegopt', 'quality=85', '-f', String(page), '-l', String(page),
+          '-x', '0', '-y', String(c.y), '-W', String(w), '-H', String(c.height), '-singlefile', pdfPath, c.out],
+        { timeout: 2 * 60_000 },
+      );
+    }
+    return crops.map((c) => `${c.out}.jpg`);
   }
 
   /** Generate items window by window so every request fits the provider budget. */

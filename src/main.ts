@@ -82,7 +82,11 @@ async function bootstrap() {
         'https://scana.in',
         'https://www.scana.in',
       ];
-      if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+      // In development, also allow phones/laptops on the local network (e.g. testing a QR scan)
+      const isLanDev =
+        process.env.NODE_ENV !== 'production' &&
+        /^https?:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$/.test(origin);
+      if (allowed.includes(origin) || origin.endsWith('.vercel.app') || isLanDev) {
         callback(null, true);
       } else {
         callback(null, false);

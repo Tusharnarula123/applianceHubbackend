@@ -440,7 +440,8 @@ export class AiChatService {
     const appliance = await this.applianceRepo.findOne({ where: { id: applianceId } });
     if (!appliance) throw new NotFoundException(`Appliance ${applianceId} not found`);
 
-    // Increment scan count on the latest QR code for this appliance (best-effort)
+    // Count the scan on the appliance, and on its latest QR code if one exists (best-effort).
+    // Appliances without a model number never get a QR record, so don't require one.
     try {
       const qr = await this.qrCodeRepo.findOne({
         where: { appliance_id: applianceId },
@@ -449,15 +450,15 @@ export class AiChatService {
       if (qr) {
         qr.scan_count += 1;
         await this.qrCodeRepo.save(qr);
-        appliance.scans_count += 1;
-        await this.applianceRepo.save(appliance);
-        await this.activityService.logForAppliance(
-          applianceId,
-          'scan',
-          `QR code scanned for ${appliance.name}`,
-          { qr_code_id: qr.id, source: 'chatbot' },
-        );
       }
+      await this.applianceRepo.increment({ id: applianceId }, 'scans_count', 1);
+      appliance.scans_count += 1;
+      await this.activityService.logForAppliance(
+        applianceId,
+        'scan',
+        `QR code scanned for ${appliance.name}`,
+        { qr_code_id: qr?.id ?? null, source: 'chatbot' },
+      );
     } catch (err) {
       this.logger.warn(`Scan tracking failed for appliance ${applianceId}: ${err}`);
     }

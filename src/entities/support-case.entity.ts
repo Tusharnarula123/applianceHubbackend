@@ -80,6 +80,43 @@ export class SupportCaseEntity {
   @Column('text', { nullable: true })
   resolution_note: string | null;
 
+  // ── Repair journey ────────────────────────────────────────────────────────
+
+  /** Unguessable token for the customer's case-tracking page */
+  @Column('varchar', { length: 64, nullable: true })
+  public_token: string | null;
+
+  /**
+   * Canonical status shown to the customer, synced from the brand's help desk:
+   * received | sent_to_service | awaiting_customer | appointment_scheduled |
+   * parts_ordered | in_repair | resolved | closed | cancelled
+   */
+  @Column('varchar', { length: 30, default: 'received' })
+  canonical_status: string;
+
+  /** YYYY-MM-DD as supplied by the customer (evidence, not verified) */
+  @Column('varchar', { length: 10, nullable: true })
+  purchase_date: string | null;
+
+  @Column('varchar', { length: 100, nullable: true })
+  serial_number: string | null;
+
+  /** Uploaded photos/receipts: [{ id, key, name, mime, size, kind, uploaded_at }] — served only via access-checked endpoints */
+  @Column('json', { nullable: true })
+  evidence: Array<Record<string, any>> | null;
+
+  /** Earlier case or ticket references the customer gave */
+  @Column('json', { nullable: true })
+  prior_case_refs: string[] | null;
+
+  /** Last event received from any source — used for stale-sync alerts */
+  @Column('timestamp', { nullable: true })
+  last_event_at: Date | null;
+
+  /** The customer's own answer after the case was resolved: fixed or not */
+  @Column('boolean', { nullable: true })
+  customer_confirmed_fixed: boolean | null;
+
   @CreateDateColumn()
   created_at: Date;
 

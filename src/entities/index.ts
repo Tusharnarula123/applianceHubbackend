@@ -36,3 +36,6 @@ export {
 
 // Campaigns & notifications
 export { CampaignEntity, CampaignEventEntity, SubscriberEntity, NotificationJobEntity } from './engagement.entity.js';
+
+// Repair journey
+export { CaseEventEntity, ProductResolutionEntity } from './case-event.entity.js';

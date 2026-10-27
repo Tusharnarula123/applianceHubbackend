@@ -440,6 +440,9 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
   },
 ];
 
+/** Bump when the system prompt or safety rules change — stored with every answer. */
+const GUIDANCE_VERSION = '2026-10-27.1';
+
 /** Customer messages that are actual questions (worth logging when the manuals have no answer). */
 function looksLikeQuestion(text: string): boolean {
   const t = text.trim();
@@ -676,6 +679,17 @@ export class AiChatService {
         chat_session_id: sessionId,
         role: 'assistant',
         content: finalContent,
+        // Provenance: which sources and guidance version produced this answer
+        metadata: {
+          guidance_version: GUIDANCE_VERSION,
+          model: this.ai.chatModel,
+          verified_knowledge_used: verified.length > 0,
+          rag_chunks: rag.chunkCount,
+          rag_top_score: rag.topScore,
+          sources: (rag.sources ?? []).map((s: any) => ({ id: s.id, name: s.name })),
+          excerpt_pages: (rag.excerpts ?? []).map((e: any) => e.page_index),
+          tools: toolCallsMade,
+        },
       }),
     );
 
@@ -1420,6 +1434,7 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
             safety_flag: c.safety_flag,
             completeness: c.completeness,
             appliance_name: appliance.name,
+            track_url: c.public_token ? `/case/${c.public_token}` : null,
           });
           void this.activityService.logForAppliance(
             applianceId,
@@ -1439,7 +1454,8 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
                     !c.error_codes?.length ? 'error codes (or confirmation there are none)' : null,
                   ].filter(Boolean)
                 : [],
-            message: `Support case ${ref} is ready for the team with the full chat history.`,
+            tracking_link: c.public_token ? `/case/${c.public_token}` : null,
+            message: `Support case ${ref} is ready for the team with the full chat history. The customer can follow it and add photos or the receipt using the tracking link (shown on the case card — do not paste it yourself).`,
           };
         } catch (err: any) {
           return { error: `Could not prepare the support case: ${err?.message ?? err}` };

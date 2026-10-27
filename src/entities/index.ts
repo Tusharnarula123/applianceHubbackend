@@ -26,3 +26,10 @@ export { SupportCaseEntity } from './support-case.entity.js';
 export { KnowledgeGapEntity } from './knowledge-gap.entity.js';
 export { MaintenanceTaskEntity } from './maintenance-task.entity.js';
 export { RecallNoticeEntity } from './recall-notice.entity.js';
+
+// Scana Connect
+export { IntegrationConnectionEntity } from './integration-connection.entity.js';
+export {
+  SyncRunEntity, CaseDeliveryEntity, ExternalRecordMappingEntity,
+  WebhookEventEntity, AuditEventEntity, ProductIdentifierEntity,
+} from './connect-records.entity.js';

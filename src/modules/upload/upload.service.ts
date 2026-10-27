@@ -1,4 +1,5 @@
-import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ConflictException, Logger } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as path from 'path';
@@ -77,6 +78,18 @@ export class UploadService {
     if (!file) throw new BadRequestException('No file provided');
     this.validateFile(file);
 
+    // Versioning: reject identical re-uploads; a new file with the same name
+    // becomes the next revision and the old one is kept, never silently replaced.
+    const checksum = createHash('sha256').update(file.buffer).digest('hex');
+    const duplicate = await this.documentRepository.findOne({ where: { appliance_id: applianceId, checksum } });
+    if (duplicate) {
+      throw new ConflictException(`This exact file is already uploaded as "${duplicate.name}" (revision ${duplicate.revision ?? 1}).`);
+    }
+    const previous = await this.documentRepository.findOne({
+      where: { appliance_id: applianceId, name: file.originalname },
+      order: { created_at: 'DESC' },
+    });
+
     const fileId = uuidv4();
     const ext = path.extname(file.originalname);
     const filename = `${fileId}${ext}`;
@@ -106,6 +119,9 @@ export class UploadService {
       file_size_bytes: file.size,
       file_type: this.resolveDocumentType(documentType),
       mime_type: file.mimetype,
+      checksum,
+      revision: previous ? (previous.revision ?? 1) + 1 : 1,
+      supersedes_id: previous?.id ?? null,
     });
 
     const savedDocument = await this.documentRepository.save(document);

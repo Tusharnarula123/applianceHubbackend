@@ -45,6 +45,18 @@ export class DocumentEntity {
   @Column('timestamp', { nullable: true })
   indexed_at: Date;
 
+  /** SHA-256 of the file — identical re-uploads are rejected */
+  @Column('varchar', { length: 64, nullable: true })
+  checksum: string | null;
+
+  /** 1 for the first upload; +1 when a file with the same name replaces it */
+  @Column('int', { default: 1 })
+  revision: number;
+
+  /** The earlier document this one supersedes (kept, never silently replaced) */
+  @Column('varchar', { length: 36, nullable: true })
+  supersedes_id: string | null;
+
   @CreateDateColumn()
   created_at: Date;
 

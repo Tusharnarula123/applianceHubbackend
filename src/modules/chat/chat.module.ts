@@ -26,6 +26,7 @@ import { KnowledgeController } from './knowledge.controller.js';
 import { CacheService } from '../../common/cache.service.js';
 import { StorageService } from '../../common/storage.service.js';
 import { ActivityModule } from '../activities/activity.module.js';
+import { CasesModule } from '../cases/cases.module.js';
 import { RepairService } from '../repair/repair.service.js';
 import { SparePartsService } from '../repair/spare-parts.service.js';
 import { RepairNotificationService } from '../repair/notification.service.js';
@@ -34,6 +35,7 @@ import { RepairNotificationService } from '../repair/notification.service.js';
   imports: [
     ConfigModule,
     ActivityModule,
+    CasesModule,
     TypeOrmModule.forFeature([
       ChatSessionEntity,
       MessageEntity,

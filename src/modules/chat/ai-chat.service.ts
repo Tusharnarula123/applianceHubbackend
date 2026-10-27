@@ -20,6 +20,8 @@ import { ActivityService } from '../activities/activity.service.js';
 import { resolveClaimWarrantyId } from '../../common/resolve-claim-warranty.js';
 import { RepairService } from '../repair/repair.service.js';
 import { SparePartsService } from '../repair/spare-parts.service.js';
+import { CasesService } from '../cases/cases.service.js';
+import { SupportCaseOutcome } from '../../entities/support-case.entity.js';
 
 // ─── Tool definitions for OpenAI ───────────────────────────────────────────
 
@@ -363,7 +365,58 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
       },
     },
   },
+  /* ── Support cases, safety and maintenance ───────────── */
+  {
+    type: 'function',
+    function: {
+      name: 'prepare_support_case',
+      description:
+        'Create (or update) a structured support case for the support team when the problem cannot be safely resolved in chat: the suggested fix did not work, it needs a technician, a safety stop happened, or the customer asks for a person. Include everything learned in this chat so the customer never has to repeat themselves.',
+      parameters: {
+        type: 'object',
+        properties: {
+          customer_name:  { type: 'string', description: "Customer's name, if known." },
+          customer_email: { type: 'string', description: "Customer's email, if known." },
+          customer_phone: { type: 'string', description: "Customer's phone, if known." },
+          category: {
+            type: 'string',
+            enum: ['troubleshooting', 'warranty', 'repair', 'setup', 'other'],
+          },
+          symptoms:      { type: 'string', description: 'What the customer reports, in plain words, including when it started.' },
+          error_codes:   { type: 'array', items: { type: 'string' }, description: 'Error codes or blinking-light patterns seen. Empty if none.' },
+          steps_tried:   { type: 'array', items: { type: 'string' }, description: 'Every step the customer already tried in this chat or before.' },
+          likely_causes: { type: 'array', items: { type: 'string' }, description: 'Your best hypotheses — clearly not confirmed.' },
+          safety_flag: {
+            type: 'string',
+            enum: ['gas', 'electrical', 'water_electrical', 'fire_heat', 'refrigerant', 'other'],
+            description: 'Set ONLY when you stopped for a safety reason.',
+          },
+          summary: { type: 'string', description: '2–3 sentence brief for the support agent or technician.' },
+        },
+        required: ['symptoms', 'summary'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_maintenance_schedule',
+      description:
+        'Get the maintenance schedule for this appliance: tasks verified from the manufacturer manual (with page numbers) plus tasks the brand added. Use for "how do I maintain / how often should I clean / service" questions.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
 ];
+
+/** Customer messages that are actual questions (worth logging when the manuals have no answer). */
+function looksLikeQuestion(text: string): boolean {
+  const t = text.trim();
+  if (t.includes('@') || /^\+?[\d\s()-]{7,}$/.test(t)) return false; // contact details, not a question
+  return t.includes('?') || t.split(/\s+/).length >= 6;
+}
+
+/** Turns that only used these tools were guidance, so it is fair to ask whether it worked. */
+const FEEDBACK_SAFE_TOOLS = new Set(['get_appliance_info', 'search_youtube', 'generate_image', 'get_spare_parts', 'get_maintenance_schedule']);
 
 // ─── Service ───────────────────────────────────────────────────────────────
 
@@ -395,6 +448,7 @@ export class AiChatService {
     private activityService: ActivityService,
     private repairService: RepairService,
     private sparePartsService: SparePartsService,
+    private casesService: CasesService,
   ) {
     this.ai = resolveAiConfig(this.configService);
     this.openai = new OpenAI({ apiKey: this.ai.apiKey || 'not-configured', baseURL: this.ai.baseURL });
@@ -551,6 +605,11 @@ export class AiChatService {
     const verified = await this.knowledgeService.getVerifiedContext(appliance.id);
     const ragContext = verified + (rag.context ?? '');
 
+    // Nothing in the uploaded manuals matched → record it as a documentation gap
+    if (rag.chunkCount === 0 && looksLikeQuestion(userMessage)) {
+      void this.casesService.logGap(appliance.id, appliance.business_id ?? null, userMessage);
+    }
+
     // 5. Build OpenAI messages array
     const systemPrompt = this.buildSystemPrompt(appliance, customerContext, ragContext);
     const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -597,6 +656,35 @@ export class AiChatService {
       rag_sources: rag.sources,
       rag_excerpts: rag.excerpts,
       knowledge_media: gallery.items,
+      /** Show "Did this fix it?" under answers that gave guidance (not under form-filling turns) */
+      offer_feedback: toolCallsMade.every((t) => FEEDBACK_SAFE_TOOLS.has(t)) && finalContent.length > 160,
+    };
+  }
+
+  /**
+   * Customer answered "Did this fix it?" — records a verified resolution, or
+   * keeps an open case for the support team.
+   */
+  async recordOutcome(sessionId: string, resolved: boolean) {
+    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+    if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
+    const lastUser = await this.messageRepo.findOne({
+      where: { chat_session_id: sessionId, role: 'user' as any },
+      order: { created_at: 'DESC' },
+    });
+    const c = await this.casesService.recordOutcome(session.appliance_id, sessionId, resolved, lastUser?.content);
+    if (resolved) {
+      void this.activityService.logForAppliance(
+        session.appliance_id,
+        'resolve',
+        'Customer confirmed the AI fixed their issue',
+        { support_case_id: c.id, source: 'chatbot' },
+      );
+    }
+    return {
+      case_id: c.id,
+      case_ref: c.id.slice(0, 8).toUpperCase(),
+      outcome: c.outcome,
     };
   }
 
@@ -638,24 +726,43 @@ ${descriptionSection}${manualSection}
 TONE: ${toneInstruction}
 ${customerInfo}
 
-CAPABILITIES — you help customers with:
-• Warranty registration, lookups, and certificate downloads
-• Filing and tracking service claims
-• Scheduling and managing service bookings
-• General product information, appliance details, and troubleshooting
-• Searching YouTube for tutorial videos (use search_youtube tool)
-${this.ai.supportsImageGeneration ? '• Generating images (diagrams, part visuals, illustrations) when asked (use generate_image tool)\n' : ''}
+WHAT YOU DO — in this order of preference:
+1. Resolve the customer's problem safely using the manual (self-service).
+2. If it can't be safely resolved in chat, prepare a complete support case so a person can take over without asking the customer again.
+3. Complete what the customer asks for: warranty registration, claims, bookings, technician visits, parts orders, maintenance schedule${this.ai.supportsImageGeneration ? ', images' : ''}.
+
+SAFETY STOP RULES (override everything else):
+If the customer mentions a smell of gas, burning smell, smoke, sparks, scorch marks, damaged or exposed wiring, water near electrical parts, a breaker that keeps tripping, a hissing refrigerant/oil leak, a surface that is dangerously hot, or a child or pet at risk:
+- Your FIRST line tells them to stop using the appliance and, if it is safe to do so, unplug it or switch it off at the breaker / gas valve. For a gas smell: leave the area, do not operate switches or flames, and call the local gas emergency number.
+- Give NO do-it-yourself repair steps for that issue. Never instruct opening sealed panels, live electrical work, gas work or refrigerant work.
+- Call prepare_support_case with safety_flag set, then offer to book a technician (request_repair).
+
+HOW TO DIAGNOSE (troubleshooting questions):
+- If key facts are missing, ask ONE short question at a time — at most 3 before you give guidance: the exact symptom, any error code or blinking lights, when it started or what changed, what they already tried.
+- Then answer in this structure:
+  **From your manual** — only steps or values found in the VERIFIED MANUAL KNOWLEDGE or manual excerpts above, each with its page (p. X).
+  **Likely cause** — your best hypothesis, labelled as not confirmed. Leave this out if you have no basis.
+  **If that doesn't work** — the next check, or offer to prepare a support case / book a technician.
+- Never present a guess as a manual instruction. If the manual has nothing on the problem, say so plainly.
+- Customers may safely: clean filters, check settings, power-cycle, check hoses, doors and levelling, read error codes. Anything that needs tools inside the casing → technician.
+
+SUPPORT CASES:
+- Call prepare_support_case when the fix didn't work, the job needs a technician, a safety stop happened, or the customer wants a person. Fill symptoms, error_codes, steps_tried (everything tried in this chat), likely_causes and a 2–3 sentence summary for the agent. If name and email/phone are missing, ask for both in ONE message first.
+- Give the customer the case reference and tell them the team will see the full history, so they won't need to repeat themselves.
+
+MAINTENANCE: for "how do I maintain / how often should I clean or service…" call get_maintenance_schedule and present the tasks with their frequency and manual page.
+
 TOOL USE GUIDELINES:
 - Always call the relevant tool before answering questions about real data. Never invent IDs.
 - Never invent URLs, links or images. Only include a URL that a tool returned in this conversation; no placeholder links (e.g. example.com) and no markdown images unless a tool gave you the image URL.
-- For product steps, values and error codes, use only the VERIFIED MANUAL KNOWLEDGE and manual excerpts above. Do not add steps or numbers that are not in them.
-- When you create a claim or booking, share the ID with the customer for future reference.
-- After creating a claim or booking, proactively offer a PDF confirmation.
+- Do not create claims, bookings, repairs or orders without the customer clearly asking for them.
+- When you create a claim, booking, case or repair, share its reference with the customer.
+- After creating a claim or booking, offer a PDF confirmation.
 - If data is not found, say so clearly and offer to create a new record.
 - Keep replies concise, actionable, and in the configured tone above.
 
-FLOWCHART RULES (MANDATORY for how-to, setup, installation, troubleshooting):
-- ALWAYS include a Mermaid diagram. Start with a %% title: comment.
+FLOWCHART RULES (for procedures with 3 or more steps):
+- Include a Mermaid diagram. Start with a %% title: comment.
 - Use classDef to colour nodes: action=blue, decision=teal, done=green, warn=red.
 - Add emoji at the start of every node label (🔧🔍❓✅⚠️🛠️💧🧹🔩).
 - Use {braces} for decisions, [( )] for rounded start/end terminals, [ ] for action steps.
@@ -672,12 +779,9 @@ flowchart TD
   B -- No --> D[🔩 Check drain hose]:::action
   C --> E([✅ Done]):::done
 \`\`\`
-- Keep node text under 5 words after the emoji.
+- Keep node text under 5 words after the emoji. Never draw a flowchart for a safety stop.
 
-YOUTUBE SEARCH RULE (MANDATORY):
-- For ANY troubleshooting, repair, installation, setup, or maintenance question: call search_youtube FIRST.
-- After your explanation and flowchart, include the top result URL on its own line: https://youtu.be/VIDEO_ID
-- If search returns no results, skip the URL silently.
+VIDEOS: for a hands-on procedure that is safe for a customer, you may call search_youtube and put the top result URL on its own line (https://youtu.be/VIDEO_ID). Skip it for safety stops, warranty or account questions.
 
 IMAGE RULES:
 - After flowchart and YouTube link, embed relevant manual page images: ![description](url)
@@ -1243,6 +1347,81 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
           };
         } catch (err: any) {
           return { error: `Could not submit review: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'prepare_support_case': {
+        try {
+          const c = await this.casesService.upsertCase({
+            appliance_id: applianceId,
+            session_id: sessionId ?? null,
+            customer_name: args.customer_name ?? customerContext?.customer_name,
+            customer_email: args.customer_email ?? customerContext?.customer_email,
+            customer_phone: args.customer_phone,
+            category: args.category,
+            symptoms: args.symptoms,
+            error_codes: args.error_codes,
+            steps_tried: args.steps_tried,
+            likely_causes: args.likely_causes,
+            safety_flag: args.safety_flag,
+            summary: args.summary,
+            outcome: args.safety_flag ? SupportCaseOutcome.ESCALATED : undefined,
+          });
+          const ref = c.id.slice(0, 8).toUpperCase();
+          actionCards?.push({
+            type: 'support_case',
+            case_id: c.id,
+            case_ref: ref,
+            category: c.category,
+            summary: c.summary,
+            symptoms: c.symptoms,
+            error_codes: c.error_codes ?? [],
+            steps_tried: c.steps_tried ?? [],
+            safety_flag: c.safety_flag,
+            completeness: c.completeness,
+            appliance_name: appliance.name,
+          });
+          void this.activityService.logForAppliance(
+            applianceId,
+            'claim',
+            c.safety_flag ? `Safety stop — case ${ref} escalated` : `Support case ${ref} prepared by AI`,
+            { support_case_id: c.id, source: 'chatbot' },
+          );
+          return {
+            success: true,
+            case_ref: ref,
+            completeness: c.completeness,
+            missing:
+              c.completeness < 100
+                ? [
+                    !c.customer_email && !c.customer_phone ? 'a way to contact the customer' : null,
+                    !c.steps_tried?.length ? 'steps already tried' : null,
+                    !c.error_codes?.length ? 'error codes (or confirmation there are none)' : null,
+                  ].filter(Boolean)
+                : [],
+            message: `Support case ${ref} is ready for the team with the full chat history.`,
+          };
+        } catch (err: any) {
+          return { error: `Could not prepare the support case: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'get_maintenance_schedule': {
+        try {
+          const tasks = await this.casesService.getMaintenance(applianceId);
+          if (!tasks.length) {
+            return { message: 'No maintenance schedule is available for this appliance yet — the manual has no verified maintenance section.' };
+          }
+          return {
+            tasks: tasks.map((t) => ({
+              task: t.title,
+              frequency: t.frequency,
+              source: t.source === 'manual' ? `Manual${t.pages?.length ? ` p.${t.pages.join(',')}` : ''}` : 'Added by the manufacturer',
+              details: t.details,
+            })),
+          };
+        } catch (err: any) {
+          return { error: `Could not load the maintenance schedule: ${err?.message ?? err}` };
         }
       }
 

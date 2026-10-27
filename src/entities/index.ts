@@ -20,3 +20,8 @@ export { NotificationEntity } from './notification.entity.js';
 export { ActivityEntity } from './activity.entity.js';
 export { OfferEntity } from './offer.entity.js';
 export { DocumentKnowledgeEntity } from './document-knowledge.entity.js';
+
+// Support outcomes, documentation gaps and maintenance
+export { SupportCaseEntity } from './support-case.entity.js';
+export { KnowledgeGapEntity } from './knowledge-gap.entity.js';
+export { MaintenanceTaskEntity } from './maintenance-task.entity.js';

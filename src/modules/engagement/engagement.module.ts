@@ -8,7 +8,6 @@ import { ApplianceEntity } from '../../entities/appliance.entity.js';
 import { SupportCaseEntity } from '../../entities/support-case.entity.js';
 import { WarrantyRegistrationEntity } from '../../entities/warranty-registration.entity.js';
 import { CasesModule } from '../cases/cases.module.js';
-import { ChannelsService } from './channels.service.js';
 import { EngagementService } from './engagement.service.js';
 import { EngagementDashboardController, EngagementPublicController } from './engagement.controller.js';
 
@@ -27,6 +26,7 @@ import { EngagementDashboardController, EngagementPublicController } from './eng
     ]),
   ],
   controllers: [EngagementDashboardController, EngagementPublicController],
-  providers: [ChannelsService, EngagementService],
+  // ChannelsService comes from CasesModule
+  providers: [EngagementService],
 })
 export class EngagementModule {}

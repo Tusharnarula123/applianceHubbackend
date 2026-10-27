@@ -2,12 +2,14 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, MoreThanOrEqual, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
+import * as crypto from 'crypto';
 
 import { SupportCaseEntity, SupportCaseOutcome } from '../../entities/support-case.entity.js';
 import { KnowledgeGapEntity } from '../../entities/knowledge-gap.entity.js';
 import { MaintenanceTaskEntity } from '../../entities/maintenance-task.entity.js';
 import { ApplianceEntity } from '../../entities/appliance.entity.js';
 import { DocumentKnowledgeEntity } from '../../entities/document-knowledge.entity.js';
+import { CaseEventsService } from './case-events.service.js';
 
 export type CaseInput = {
   appliance_id: string;
@@ -62,6 +64,7 @@ export class CasesService {
     @InjectRepository(MaintenanceTaskEntity) private taskRepo: Repository<MaintenanceTaskEntity>,
     @InjectRepository(ApplianceEntity) private applianceRepo: Repository<ApplianceEntity>,
     @InjectRepository(DocumentKnowledgeEntity) private knowledgeRepo: Repository<DocumentKnowledgeEntity>,
+    private events: CaseEventsService,
   ) {}
 
   // ── Support cases ─────────────────────────────────────────────────────────
@@ -78,6 +81,8 @@ export class CasesService {
       Boolean(c.steps_tried && c.steps_tried.length > 0),       // what was already tried
       Boolean(c.error_codes && c.error_codes.length > 0) || /no error|no code/i.test(c.symptoms ?? ''),
       Boolean(c.summary && c.summary.trim().length > 0),
+      Boolean(c.evidence && c.evidence.length > 0),                 // photo, video or receipt
+      Boolean(c.purchase_date || c.serial_number),                  // needed for warranty routing
     ];
     return Math.round((checks.filter(Boolean).length / checks.length) * 100);
   }
@@ -121,13 +126,31 @@ export class CasesService {
           ...existing,
           ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== null && v !== undefined)),
         }
-      : { id: uuidv4(), appliance_id: input.appliance_id, business_id: appliance.business_id, ...fields };
+      : {
+          id: uuidv4(), appliance_id: input.appliance_id, business_id: appliance.business_id,
+          public_token: crypto.randomBytes(24).toString('hex'), canonical_status: 'received', ...fields,
+        };
+    if (!merged.public_token) merged.public_token = crypto.randomBytes(24).toString('hex');
 
     if (input.outcome) merged.outcome = input.outcome;
     else if (merged.safety_flag) merged.outcome = SupportCaseOutcome.ESCALATED;
     merged.completeness = this.computeCompleteness(merged);
 
-    return this.caseRepo.save(this.caseRepo.create(merged));
+    const saved = await this.caseRepo.save(this.caseRepo.create(merged));
+    if (!existing && saved.outcome !== SupportCaseOutcome.RESOLVED_BY_AI) {
+      await this.events.record(saved, {
+        type: 'created',
+        status: 'received',
+        title: saved.safety_flag ? 'Case opened after a safety stop' : 'Case prepared from your chat',
+        detail: saved.summary ?? saved.symptoms,
+        source: 'ai_chat',
+      });
+    } else if (existing && input.outcome === SupportCaseOutcome.RESOLVED_BY_AI) {
+      await this.events.record(saved, {
+        type: 'outcome', status: 'resolved', title: 'You confirmed the AI guidance fixed it', source: 'customer',
+      });
+    }
+    return saved;
   }
 
   /** Customer answered "Did this fix it?" at the end of an AI answer. */

@@ -8,6 +8,9 @@ import { DocumentKnowledgeEntity } from '../../entities/document-knowledge.entit
 import { RecallNoticeEntity } from '../../entities/recall-notice.entity.js';
 import { SparePartEntity } from '../../entities/spare-part.entity.js';
 import { RecallsService } from './recalls.service.js';
+import { CaseEventsService } from './case-events.service.js';
+import { CaseEventEntity } from '../../entities/case-event.entity.js';
+import { ChannelsService } from '../engagement/channels.service.js';
 import { CasesService } from './cases.service.js';
 import { CasesController } from './cases.controller.js';
 
@@ -21,10 +24,11 @@ import { CasesController } from './cases.controller.js';
       DocumentKnowledgeEntity,
       RecallNoticeEntity,
       SparePartEntity,
+      CaseEventEntity,
     ]),
   ],
   controllers: [CasesController],
-  providers: [CasesService, RecallsService],
-  exports: [CasesService, RecallsService],
+  providers: [CasesService, RecallsService, CaseEventsService, ChannelsService],
+  exports: [CasesService, RecallsService, CaseEventsService, ChannelsService],
 })
 export class CasesModule {}

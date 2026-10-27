@@ -18,6 +18,8 @@ import {
 import { SupportCaseEntity, SupportCaseOutcome } from '../../entities/support-case.entity.js';
 import { ApplianceEntity } from '../../entities/appliance.entity.js';
 import { parseCsv, CATALOG_FIELDS, guessMapping, normalizeCode, type CatalogField } from './catalog.js';
+import { CaseEventsService } from '../cases/case-events.service.js';
+import { mapProviderStatus, CASE_STATUS_LABEL } from '../../common/case-status.js';
 
 export type Actor = { id?: string | null; email?: string | null; business_id?: string | null };
 
@@ -48,6 +50,7 @@ export class ConnectService implements OnModuleInit, OnModuleDestroy {
     @InjectRepository(SupportCaseEntity) private caseRepo: Repository<SupportCaseEntity>,
     @InjectRepository(ApplianceEntity) private applianceRepo: Repository<ApplianceEntity>,
     private config: ConfigService,
+    private caseEvents: CaseEventsService,
   ) {
     const material =
       this.config.get<string>('CONNECT_ENCRYPTION_KEY') || process.env.JWT_SECRET || 'secret-key';
@@ -450,6 +453,11 @@ export class ConnectService implements OnModuleInit, OnModuleDestroy {
       conn.last_delivery_at = new Date();
       conn.last_error = null;
       await this.connRepo.save(conn);
+      await this.caseEvents.record(sc, {
+        type: 'sent', status: 'sent_to_service', title: 'Sent to the service team',
+        detail: 'Your case and the full chat history are with the brand\'s support team.',
+        source: 'scana', source_ref: d.id, notify: true,
+      });
       // Receivers may answer with the ticket they created
       const extId = res.json?.external_id ?? res.json?.ticket_id ?? res.json?.id;
       if (extId) await this.linkExternal(conn, sc.id, String(extId), res.json?.external_url ?? res.json?.url ?? null, res.json?.status ?? null);
@@ -584,11 +592,50 @@ export class ConnectService implements OnModuleInit, OnModuleDestroy {
         if (body.external_id) {
           await this.linkExternal(conn, sc.id, String(body.external_id), body.external_url ?? null, body.status ?? null);
         }
-        const closed = body.type === 'case.closed' || /^(closed|resolved|solved|done)$/i.test(String(body.status ?? ''));
-        if (closed && sc.outcome !== SupportCaseOutcome.RESOLVED_BY_AI) {
-          sc.outcome = SupportCaseOutcome.CLOSED;
-          if (body.resolution_note) sc.resolution_note = String(body.resolution_note).slice(0, 4000);
-          await this.caseRepo.save(sc);
+        const occurred = body.occurred_at ? new Date(body.occurred_at) : new Date();
+        const base = { source: 'helpdesk' as const, source_ref: eventId, occurred_at: occurred };
+        const type = String(body.type ?? 'case.updated');
+
+        if (type === 'appointment.scheduled' || type === 'appointment.updated') {
+          const a = body.appointment ?? {};
+          const window = [a.start, a.end].filter(Boolean).map((t: string) => new Date(t).toLocaleString()).join(' – ');
+          await this.caseEvents.record(sc, {
+            ...base, type: 'appointment', status: 'appointment_scheduled',
+            title: type === 'appointment.updated' ? 'Visit rescheduled' : 'Technician visit booked',
+            detail: [window, a.technician ? `Technician: ${a.technician}` : null].filter(Boolean).join(' · ') || null,
+            data: { start: a.start ?? null, end: a.end ?? null, technician: a.technician ?? null },
+            notify: true,
+          });
+        } else if (type === 'part.updated') {
+          const p = body.part ?? {};
+          // Compatibility, stock and delivery estimate are kept as separate facts
+          await this.caseEvents.record(sc, {
+            ...base, type: 'part_update', status: mapProviderStatus(body.status, conn.config?.status_map) ?? 'parts_ordered',
+            title: `Part update${p.name ? `: ${p.name}` : ''}`,
+            detail: [p.status ? `Status: ${p.status}` : null, p.eta ? `Estimated delivery (from supplier): ${new Date(p.eta).toDateString()}` : null].filter(Boolean).join(' · ') || null,
+            data: { name: p.name ?? null, part_number: p.part_number ?? null, status: p.status ?? null, eta: p.eta ?? null },
+            notify: true,
+          });
+        } else if (type === 'comment.added') {
+          const isPublic = body.public === true;
+          await this.caseEvents.record(sc, {
+            ...base, type: 'comment', title: isPublic ? 'Message from the service team' : 'Internal note from the help desk',
+            detail: String(body.comment ?? '').slice(0, 2000) || null, visible_to_customer: isPublic, notify: isPublic,
+          });
+        } else {
+          const mapped = type === 'case.closed' ? 'closed' : mapProviderStatus(body.status, conn.config?.status_map);
+          if (mapped && mapped !== sc.canonical_status) {
+            await this.caseEvents.record(sc, {
+              ...base, type: 'status_changed', status: mapped,
+              title: CASE_STATUS_LABEL[mapped], detail: body.message ? String(body.message).slice(0, 1000) : null,
+              data: { provider_status: body.status ?? null }, notify: true,
+            });
+          }
+          if ((mapped === 'resolved' || mapped === 'closed') && sc.outcome !== SupportCaseOutcome.RESOLVED_BY_AI) {
+            sc.outcome = SupportCaseOutcome.CLOSED;
+            if (body.resolution_note) sc.resolution_note = String(body.resolution_note).slice(0, 4000);
+            await this.caseRepo.save(sc);
+          }
         }
       }
     } catch (err: any) {
@@ -806,6 +853,17 @@ export class ConnectService implements OnModuleInit, OnModuleDestroy {
       identifiers,
       last_import: lastImport,
       deliveries: { pending_approval: pending, failed, delivered_30d: delivered },
+      stale_cases: await this.staleCaseCount(businessId),
     };
+  }
+
+  /** Cases linked to a help-desk ticket that are still open but have had no update for CASE_STALE_DAYS. */
+  private async staleCaseCount(businessId: string) {
+    const days = Math.max(1, Number(this.config.get('CASE_STALE_DAYS') ?? 3));
+    const linked = await this.mappingRepo.find({ where: { business_id: businessId, object_type: 'support_case' }, select: ['internal_id'] });
+    if (!linked.length) return 0;
+    const open = ['received', 'sent_to_service', 'awaiting_customer', 'appointment_scheduled', 'parts_ordered', 'in_repair'];
+    const cases = await this.caseRepo.find({ where: { id: In(linked.map((l) => l.internal_id)), canonical_status: In(open) } });
+    return cases.filter((c) => Date.now() - new Date(c.last_event_at ?? c.updated_at).getTime() > days * 86_400_000).length;
   }
 }

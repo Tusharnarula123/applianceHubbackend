@@ -9,11 +9,13 @@ import {
 import { SupportCaseEntity } from '../../entities/support-case.entity.js';
 import { ApplianceEntity } from '../../entities/appliance.entity.js';
 import { ConnectService } from './connect.service.js';
+import { CasesModule } from '../cases/cases.module.js';
 import { ConnectController } from './connect.controller.js';
 
 @Module({
   imports: [
     ConfigModule,
+    CasesModule,
     TypeOrmModule.forFeature([
       IntegrationConnectionEntity,
       SyncRunEntity,

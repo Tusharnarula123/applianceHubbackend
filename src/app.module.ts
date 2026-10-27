@@ -24,6 +24,7 @@ import { CasesModule } from './modules/cases/cases.module.js';
 import { InsightsModule } from './modules/insights/insights.module.js';
 import { ConnectModule } from './modules/connect/connect.module.js';
 import { EngagementModule } from './modules/engagement/engagement.module.js';
+import { JourneyModule } from './modules/journey/journey.module.js';
 import { ActivityModule } from './modules/activities/activity.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
 import { UploadModule } from './modules/upload/upload.module.js';
@@ -116,6 +117,7 @@ const __dirname = dirname(__filename);
     InsightsModule,
     ConnectModule,
     EngagementModule,
+    JourneyModule,
     ActivityModule,
     SupportModule,
     UsersModule,

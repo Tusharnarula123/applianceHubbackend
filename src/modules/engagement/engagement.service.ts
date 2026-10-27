@@ -640,7 +640,7 @@ export class EngagementService implements OnModuleInit, OnModuleDestroy {
 
     let res: SendResult;
     if (job.channel === 'email') {
-      res = s.email ? await this.channels.email(s.email, msg.title, this.emailHtml(name, product, msg, prefsUrl, job.kind === 'campaign'), prefsUrl) : { ok: false, error: 'No email', permanent: true };
+      res = s.email ? await this.channels.email(s.email, msg.title, this.emailHtml(name, product, msg, prefsUrl, job.kind === 'campaign'), `${this.apiBase}/api/engagement/preferences/${s.unsubscribe_token}/unsubscribe`) : { ok: false, error: 'No email', permanent: true };
     } else if (job.channel === 'push') {
       res = s.push_subscription
         ? await this.channels.push(s.push_subscription, { title: msg.title, body: msg.detail || product, url: msg.url, tag: job.kind })

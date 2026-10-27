@@ -25,3 +25,4 @@ export { DocumentKnowledgeEntity } from './document-knowledge.entity.js';
 export { SupportCaseEntity } from './support-case.entity.js';
 export { KnowledgeGapEntity } from './knowledge-gap.entity.js';
 export { MaintenanceTaskEntity } from './maintenance-task.entity.js';
+export { RecallNoticeEntity } from './recall-notice.entity.js';

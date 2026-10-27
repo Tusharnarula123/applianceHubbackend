@@ -21,6 +21,7 @@ import { ClaimModule } from './modules/claims/claim.module.js';
 import { BookingModule } from './modules/bookings/booking.module.js';
 import { ChatModule } from './modules/chat/chat.module.js';
 import { CasesModule } from './modules/cases/cases.module.js';
+import { InsightsModule } from './modules/insights/insights.module.js';
 import { ActivityModule } from './modules/activities/activity.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
 import { UploadModule } from './modules/upload/upload.module.js';
@@ -110,6 +111,7 @@ const __dirname = dirname(__filename);
     BookingModule,
     ChatModule,
     CasesModule,
+    InsightsModule,
     ActivityModule,
     SupportModule,
     UsersModule,

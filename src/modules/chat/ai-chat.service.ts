@@ -21,6 +21,7 @@ import { resolveClaimWarrantyId } from '../../common/resolve-claim-warranty.js';
 import { RepairService } from '../repair/repair.service.js';
 import { SparePartsService } from '../repair/spare-parts.service.js';
 import { CasesService } from '../cases/cases.service.js';
+import { RecallsService } from '../cases/recalls.service.js';
 import { SupportCaseOutcome } from '../../entities/support-case.entity.js';
 
 // ─── Tool definitions for OpenAI ───────────────────────────────────────────
@@ -400,6 +401,37 @@ const CHATBOT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'check_part_compatibility',
+      description:
+        "Check which catalog parts are listed as compatible with this appliance's model (or another model number the customer gives). Use before recommending or ordering any part. Only parts whose compatibility list includes the exact model are confirmed fits.",
+      parameters: {
+        type: 'object',
+        properties: {
+          part: { type: 'string', description: 'Part name or number to look for, e.g. "door gasket". Optional.' },
+          model: { type: 'string', description: "Model number to check. Defaults to this appliance's model." },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'check_recalls',
+      description:
+        "Check whether a recall or safety notice applies to this appliance. Pass the customer's serial number when they give it — some notices only cover certain serial numbers. Use when a customer asks about recalls or safety, or before giving repair steps on a product with a notice.",
+      parameters: {
+        type: 'object',
+        properties: {
+          serial_number: { type: 'string', description: "The customer's serial number, if known." },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_maintenance_schedule',
       description:
         'Get the maintenance schedule for this appliance: tasks verified from the manufacturer manual (with page numbers) plus tasks the brand added. Use for "how do I maintain / how often should I clean / service" questions.',
@@ -416,7 +448,7 @@ function looksLikeQuestion(text: string): boolean {
 }
 
 /** Turns that only used these tools were guidance, so it is fair to ask whether it worked. */
-const FEEDBACK_SAFE_TOOLS = new Set(['get_appliance_info', 'search_youtube', 'generate_image', 'get_spare_parts', 'get_maintenance_schedule']);
+const FEEDBACK_SAFE_TOOLS = new Set(['get_appliance_info', 'search_youtube', 'generate_image', 'get_spare_parts', 'get_maintenance_schedule', 'check_part_compatibility']);
 
 // ─── Service ───────────────────────────────────────────────────────────────
 
@@ -449,6 +481,7 @@ export class AiChatService {
     private repairService: RepairService,
     private sparePartsService: SparePartsService,
     private casesService: CasesService,
+    private recallsService: RecallsService,
   ) {
     this.ai = resolveAiConfig(this.configService);
     this.openai = new OpenAI({ apiKey: this.ai.apiKey || 'not-configured', baseURL: this.ai.baseURL });
@@ -603,7 +636,13 @@ export class AiChatService {
     const rag = await this.ragService.retrieveContextWithMeta(userMessage, appliance.id);
     // Verified knowledge (AI scan → OCR → generated guides → cross-verified) comes first
     const verified = await this.knowledgeService.getVerifiedContext(appliance.id);
-    const ragContext = verified + (rag.context ?? '');
+    const recalls = await this.recallsService.activeFor(appliance.id).catch(() => []);
+    const recallContext = recalls.length
+      ? `\n\nACTIVE RECALL / SAFETY NOTICES for this product (published by the manufacturer):\n${recalls
+          .map((r) => `- [${r.severity}] ${r.title}: ${r.description} Remedy: ${r.remedy}${r.limited_to_serials ? ' (only some serial numbers — ask for the serial and call check_recalls)' : ''}${r.official_url ? ` Official notice: ${r.official_url}` : ''}`)
+          .join('\n')}\nMention a relevant notice before any repair steps. Never say a unit is unaffected unless check_recalls confirmed it with the serial.`
+      : '';
+    const ragContext = recallContext + verified + (rag.context ?? '');
 
     // Nothing in the uploaded manuals matched → record it as a documentation gap
     if (rag.chunkCount === 0 && looksLikeQuestion(userMessage)) {
@@ -724,6 +763,7 @@ Category: ${appliance.category}. SKU: ${appliance.sku}.
 ${descriptionSection}${manualSection}
 
 TONE: ${toneInstruction}
+LANGUAGE: Reply in the language the customer writes in (Hindi, Hinglish, Spanish, etc.). Keep model numbers, error codes and part numbers exactly as written. For safety instructions, keep the meaning identical to the manual — do not soften them in translation.
 ${customerInfo}
 
 WHAT YOU DO — in this order of preference:
@@ -1403,6 +1443,55 @@ Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'nume
           };
         } catch (err: any) {
           return { error: `Could not prepare the support case: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'check_part_compatibility': {
+        try {
+          const model = String(args.model ?? appliance.model ?? '').trim();
+          if (!model) return { message: 'No model number is recorded for this appliance. Ask the customer for the model number on the rating plate.' };
+          const result = await this.recallsService.compatibleParts(appliance.business_id, model, args.part);
+          if (!result.exact.length) {
+            return {
+              model,
+              confirmed_fits: [],
+              message: result.unverified.length
+                ? `No part is confirmed for model ${model}. ${result.unverified.length} matching part(s) have no compatibility data, so the fit cannot be confirmed — offer a support case or technician instead of ordering.`
+                : `No catalog part lists model ${model} as compatible.`,
+            };
+          }
+          return {
+            model,
+            confirmed_fits: result.exact,
+            message: `${result.exact.length} part(s) are listed as compatible with ${model}.`,
+          };
+        } catch (err: any) {
+          return { error: `Could not check compatibility: ${err?.message ?? err}` };
+        }
+      }
+
+      case 'check_recalls': {
+        try {
+          const serial = args.serial_number ? String(args.serial_number) : null;
+          const notices = await this.recallsService.activeFor(applianceId, serial);
+          for (const n of notices) {
+            actionCards?.push({
+              type: 'recall_notice',
+              title: n.title,
+              description: n.description,
+              remedy: n.remedy,
+              severity: n.severity,
+              official_url: n.official_url,
+              serial_checked: n.serial_checked,
+              appliance_name: appliance.name,
+            });
+          }
+          if (!notices.length) {
+            return { affected: false, message: serial ? `No active notice covers serial ${serial}.` : 'There are no active recall or safety notices for this product.' };
+          }
+          return { affected: true, notices };
+        } catch (err: any) {
+          return { error: `Could not check recalls: ${err?.message ?? err}` };
         }
       }
 

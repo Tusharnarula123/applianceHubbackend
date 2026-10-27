@@ -172,4 +172,25 @@ export class AiChatController {
       customer_email: body.customer_email,
     });
   }
+
+  /**
+   * POST /api/chat/ai/session/:sessionId/outcome
+   *
+   * The customer's answer to "Did this fix it?". `resolved: true` records a
+   * verified AI resolution; `false` keeps an open case for the support team.
+   */
+  @Post('session/:sessionId/outcome')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Record whether the AI guidance fixed the problem' })
+  @ApiParam({ name: 'sessionId', description: 'Chat session UUID' })
+  async recordOutcome(
+    @Param('sessionId') sessionId: string,
+    @Body() body: { resolved?: boolean },
+  ) {
+    if (typeof body?.resolved !== 'boolean') {
+      throw new BadRequestException('resolved must be true or false');
+    }
+    return this.aiChatService.recordOutcome(sessionId, body.resolved);
+  }
 }

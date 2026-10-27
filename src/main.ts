@@ -29,7 +29,8 @@ async function bootstrap() {
     bodyParser: false,
   });
 
-  app.use(json({ limit: MAX_UPLOAD_BYTES }));
+  // Keep the exact request bytes so signed webhooks can be verified (Scana Connect)
+  app.use(json({ limit: MAX_UPLOAD_BYTES, verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
   app.use(urlencoded({ extended: true, limit: MAX_UPLOAD_BYTES }));
 
   // Serve local uploads only when R2 is not configured (local dev fallback)

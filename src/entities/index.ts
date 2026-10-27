@@ -33,3 +33,6 @@ export {
   SyncRunEntity, CaseDeliveryEntity, ExternalRecordMappingEntity,
   WebhookEventEntity, AuditEventEntity, ProductIdentifierEntity,
 } from './connect-records.entity.js';
+
+// Campaigns & notifications
+export { CampaignEntity, CampaignEventEntity, SubscriberEntity, NotificationJobEntity } from './engagement.entity.js';

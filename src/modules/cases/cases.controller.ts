@@ -4,12 +4,16 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { CasesService } from './cases.service.js';
+import { RecallsService, type RecallInput } from './recalls.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 
 @ApiTags('Support Cases')
 @Controller('api')
 export class CasesController {
-  constructor(private readonly cases: CasesService) {}
+  constructor(
+    private readonly cases: CasesService,
+    private readonly recalls: RecallsService,
+  ) {}
 
   // ── Support cases (dashboard) ─────────────────────────────────────────────
 
@@ -93,5 +97,62 @@ export class CasesController {
   @ApiBearerAuth()
   deleteTask(@Param('id') id: string) {
     return this.cases.deleteMaintenanceTask(id);
+  }
+
+  // ── Recall & safety notices (module K) ────────────────────────────────────
+
+  @Get('recalls/business/:businessId')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Recall and safety notices published by the brand' })
+  listRecalls(@Param('businessId') businessId: string) {
+    return this.recalls.list(businessId);
+  }
+
+  @Post('recalls')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Publish a recall or safety notice' })
+  createRecall(@Body() body: RecallInput) {
+    if (!body.business_id || !body.title?.trim() || !body.description?.trim() || !body.remedy?.trim()) {
+      throw new BadRequestException('business_id, title, description and remedy are required');
+    }
+    if (!body.appliance_id && !(body.affected_models ?? []).length) {
+      throw new BadRequestException('Choose an appliance or list at least one affected model');
+    }
+    return this.recalls.create(body);
+  }
+
+  @Patch('recalls/:id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  updateRecall(@Param('id') id: string, @Body() body: Partial<RecallInput>) {
+    return this.recalls.update(id, body);
+  }
+
+  @Delete('recalls/:id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  deleteRecall(@Param('id') id: string) {
+    return this.recalls.remove(id);
+  }
+
+  /** Public: the customer chat page checks this on load. */
+  @Get('appliances/:applianceId/recalls')
+  @ApiOperation({ summary: 'Active recall notices for an appliance (optionally by serial)' })
+  @ApiQuery({ name: 'serial', required: false })
+  activeRecalls(@Param('applianceId') applianceId: string, @Query('serial') serial?: string) {
+    return this.recalls.activeFor(applianceId, serial);
+  }
+
+  // ── Part compatibility (module E) ─────────────────────────────────────────
+
+  @Get('parts/compatibility/:businessId')
+  @ApiOperation({ summary: 'Catalog parts that list a model number as compatible' })
+  @ApiQuery({ name: 'model', required: true })
+  @ApiQuery({ name: 'q', required: false })
+  compatibility(@Param('businessId') businessId: string, @Query('model') model: string, @Query('q') q?: string) {
+    if (!model?.trim()) throw new BadRequestException('model is required');
+    return this.recalls.compatibleParts(businessId, model, q);
   }
 }

@@ -7,6 +7,9 @@ import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createRequire } from 'module';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import * as os from 'os';
 
 const require = createRequire(import.meta.url);
 type PdfParseFn = (
@@ -21,6 +24,7 @@ type PdfParseFn = (
 ) => Promise<{ text: string; numpages: number }>;
 
 const pdfParse = require('pdf-parse') as PdfParseFn;
+const execFileAsync = promisify(execFile);
 
 import { DocumentEntity } from '../../entities/document.entity.js';
 import { DocumentChunkEntity } from '../../entities/document-chunk.entity.js';
@@ -29,6 +33,7 @@ import {
   resolveDocumentFilePath,
 } from '../../common/uploads-path.js';
 import { StorageService } from '../../common/storage.service.js';
+import { DocumentFilesService } from '../../common/document-files.service.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -86,6 +91,8 @@ export type RagContextResult = {
 export class RagService implements OnModuleInit {
   private readonly logger = new Logger(RagService.name);
   private openai: OpenAI;
+  /** False on Groq-only setups: Groq has no embeddings endpoint, so retrieval falls back to BM25 */
+  private readonly hasEmbeddings: boolean;
 
   constructor(
     @InjectRepository(DocumentEntity)
@@ -94,12 +101,14 @@ export class RagService implements OnModuleInit {
     private chunkRepo: Repository<DocumentChunkEntity>,
     private configService: ConfigService,
     private storageService: StorageService,
+    private documentFiles: DocumentFilesService,
   ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     this.openai = new OpenAI({ apiKey: apiKey || 'not-configured' });
-    if (!apiKey?.trim()) {
+    this.hasEmbeddings = Boolean(apiKey?.trim());
+    if (!this.hasEmbeddings) {
       this.logger.warn(
-        'OPENAI_API_KEY is missing — PDF embedding and AI chat RAG will not work until it is set in .env',
+        'OPENAI_API_KEY is not set — manuals are searched by keyword ranking (BM25) instead of embeddings. Set it for semantic search.',
       );
     }
   }
@@ -124,7 +133,8 @@ export class RagService implements OnModuleInit {
           toFix.push(doc.id);
           continue;
         }
-        if (doc.embedding_status === 'indexed') {
+        // Keyword-only setups never store vectors — re-embedding would loop on every restart
+        if (doc.embedding_status === 'indexed' && this.hasEmbeddings) {
           const withEmb = await this.chunkRepo
             .createQueryBuilder('c')
             .where('c.document_id = :documentId', { documentId: doc.id })
@@ -235,7 +245,10 @@ export class RagService implements OnModuleInit {
         .andWhere('c.embedding IS NOT NULL')
         .getCount();
 
-      if (stored === 0 || withEmbedding === 0) {
+      if (stored === 0) {
+        throw new Error('No text chunks were stored from this PDF');
+      }
+      if (withEmbedding === 0 && this.hasEmbeddings) {
         throw new Error('No embedding vectors were stored (check OPENAI_API_KEY and PDF text)');
       }
 
@@ -246,7 +259,9 @@ export class RagService implements OnModuleInit {
       });
 
       this.logger.log(
-        `Doc ${documentId}: indexed ${withEmbedding}/${stored} chunks for chatbot RAG ✓`,
+        withEmbedding
+          ? `Doc ${documentId}: indexed ${withEmbedding}/${stored} chunks for chatbot RAG ✓`
+          : `Doc ${documentId}: indexed ${stored} chunks for keyword search ✓ (no embeddings key)`,
       );
     } catch (err) {
       this.logger.error(`Doc ${documentId}: indexing failed — ${err}`);
@@ -335,11 +350,7 @@ export class RagService implements OnModuleInit {
 
   async retrieveContextWithMeta(query: string, applianceId: string): Promise<RagContextResult> {
     try {
-      const queryEmbedding = await this.embedText(query);
-      if (!queryEmbedding) {
-        this.logger.warn(`retrieveContext: no query embedding (check OPENAI_API_KEY)`);
-        return { context: '', chunkCount: 0, topScore: 0, sources: [], excerpts: [] };
-      }
+      const queryEmbedding = this.hasEmbeddings ? await this.embedText(query) : null;
 
       const chunks = await this.chunkRepo.find({
         where: { appliance_id: applianceId },
@@ -351,16 +362,26 @@ export class RagService implements OnModuleInit {
         return { context: '', chunkCount: 0, topScore: 0, sources: [], excerpts: [] };
       }
 
+      // Semantic search when embeddings exist; otherwise BM25 keyword ranking
+      const canUseVectors = Boolean(queryEmbedding) && chunks.some((c) => this.normalizeEmbedding(c.embedding)?.length);
+      const keyword = canUseVectors ? null : this.keywordScores(query, chunks.map((c) => c.content));
       const scored = chunks
-        .map((c) => {
-          const embedding = this.normalizeEmbedding(c.embedding);
-          if (!embedding?.length) return null;
+        .map((c, i) => {
+          let score: number;
+          if (canUseVectors) {
+            const embedding = this.normalizeEmbedding(c.embedding);
+            if (!embedding?.length) return null;
+            score = this.cosineSimilarity(queryEmbedding!, embedding);
+          } else {
+            score = keyword![i];
+            if (score <= 0) return null;
+          }
           return {
             document_id: c.document_id,
             content: c.content,
             page_index: c.page_index ?? 0,
             chunk_index: c.chunk_index ?? 0,
-            score: this.cosineSimilarity(queryEmbedding, embedding),
+            score,
           };
         })
         .filter(
@@ -520,11 +541,7 @@ RULES FOR MANUAL EXCERPTS:
    * Check whether a file exists — in R2 or on local disk depending on config.
    */
   private async fileExists(fileUrl: string): Promise<boolean> {
-    if (this.storageService.isEnabled()) {
-      const key = this.storageService.keyFromFileUrl(fileUrl);
-      return this.storageService.exists(key);
-    }
-    return documentFileExists(fileUrl);
+    return this.documentFiles.existsByUrl(fileUrl);
   }
 
   /** Extract text per PDF page (page_index is 1-based). */
@@ -534,23 +551,12 @@ RULES FOR MANUAL EXCERPTS:
     try {
       let buffer: Buffer;
 
-      if (this.storageService.isEnabled()) {
-        // ── Download from R2 ──────────────────────────────────
-        const key = this.storageService.keyFromFileUrl(fileUrl);
-        try {
-          buffer = await this.storageService.download(key);
-        } catch (err) {
-          this.logger.warn(`R2 download failed for ${key}: ${err}`);
-          return [];
-        }
-      } else {
-        // ── Read from local disk ──────────────────────────────
-        const filePath = resolveDocumentFilePath(fileUrl);
-        if (!fs.existsSync(filePath)) {
-          this.logger.warn(`PDF file not found on disk: ${filePath}`);
-          return [];
-        }
-        buffer = fs.readFileSync(filePath);
+      try {
+        // R2, local disk, or the database backup (restored if the host wiped the disk)
+        buffer = await this.documentFiles.readByUrl(fileUrl);
+      } catch (err) {
+        this.logger.warn(`PDF unavailable (${fileUrl}): ${err}`);
+        return [];
       }
       const pages: Array<{ page_index: number; text: string }> = [];
       let currentPage = 0;
@@ -695,6 +701,7 @@ RULES FOR MANUAL EXCERPTS:
   }
 
   private async embedBatch(texts: string[]): Promise<(number[] | null)[]> {
+    if (!this.hasEmbeddings) return texts.map(() => null);
     try {
       const response = await this.openai.embeddings.create({
         model: EMBED_MODEL,
@@ -710,6 +717,80 @@ RULES FOR MANUAL EXCERPTS:
   private async embedText(text: string): Promise<number[] | null> {
     const results = await this.embedBatch([text.slice(0, 2000)]);
     return results[0];
+  }
+
+  /**
+   * BM25 keyword relevance of each document for the query, squashed to 0–1 so
+   * it can share thresholds with cosine similarity. Error codes such as "E4"
+   * or "5C" are kept as terms.
+   */
+  private keywordScores(query: string, docs: string[]): number[] {
+    const STOP = new Set(('a an and are as at be but by can do does for from has have how i in is it its my me of on or so that the this to was what when where which why will with you your not no please help get got there they'
+      + ' about after again also am any because been before being both could did doing each few further had having he her here hers him his into just more most must off once only other our out over own same she should some such than their them then these those through too under until very we were while who whom would yours').split(' '));
+    const tokenize = (t: string) =>
+      t.toLowerCase().normalize('NFKD').split(/[^a-z0-9\u0900-\u097f]+/).filter((w) => w && !STOP.has(w) && (w.length > 1 || /\d/.test(w)));
+    const q = [...new Set(tokenize(query))];
+    if (!q.length || !docs.length) return docs.map(() => 0);
+    const toks = docs.map(tokenize);
+    const avgLen = toks.reduce((n, t) => n + t.length, 0) / toks.length || 1;
+    const df = new Map<string, number>();
+    for (const t of toks) for (const w of new Set(t)) df.set(w, (df.get(w) ?? 0) + 1);
+    const N = toks.length;
+    const k1 = 1.4, b = 0.75;
+    const raw = toks.map((t) => {
+      const tf = new Map<string, number>();
+      for (const w of t) tf.set(w, (tf.get(w) ?? 0) + 1);
+      let s = 0;
+      for (const w of q) {
+        const f = tf.get(w);
+        if (!f) continue;
+        const idf = Math.log(1 + (N - (df.get(w) ?? 0) + 0.5) / ((df.get(w) ?? 0) + 0.5));
+        s += idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * t.length) / avgLen)));
+      }
+      // Share of query terms present — rewards chunks that cover the whole question
+      const coverage = q.filter((w) => tf.has(w)).length / q.length;
+      return s * (0.5 + coverage);
+    });
+    // Squash to 0–1: ~0.55 is a strong match, comparable to the cosine thresholds
+    return raw.map((s) => (s > 0 ? s / (s + 4) : 0));
+  }
+
+  /** Newest PDF manual of an appliance (for page links when no excerpt names the document). */
+  async latestManualId(applianceId: string): Promise<string | null> {
+    const doc = await this.documentRepo.findOne({
+      where: { appliance_id: applianceId, mime_type: 'application/pdf' },
+      order: { created_at: 'DESC' },
+    });
+    return doc?.id ?? null;
+  }
+
+  /**
+   * One manual page as a JPEG, for the step cards of a visual guide. Rendered
+   * with poppler on first request and cached on disk — no AI cost.
+   */
+  async renderManualPage(applianceId: string, documentId: string, page: number): Promise<Buffer | null> {
+    if (!Number.isInteger(page) || page < 1 || page > 2000) return null;
+    const doc = await this.documentRepo.findOne({ where: { id: documentId, appliance_id: applianceId } });
+    if (!doc || doc.mime_type !== 'application/pdf') return null;
+
+    const cacheDir = path.join(os.tmpdir(), 'scana-page-cache');
+    const cached = path.join(cacheDir, `${doc.id}-${page}.jpg`);
+    if (fs.existsSync(cached)) return fs.promises.readFile(cached);
+
+    const pdfPath = path.join(cacheDir, `${doc.id}.pdf`);
+    try {
+      await fs.promises.mkdir(cacheDir, { recursive: true });
+      if (!fs.existsSync(pdfPath)) await fs.promises.writeFile(pdfPath, await this.documentFiles.readByUrl(doc.file_url));
+      await execFileAsync(
+        'pdftoppm',
+        ['-r', '90', '-jpeg', '-jpegopt', 'quality=80', '-f', String(page), '-l', String(page), '-singlefile', pdfPath, cached.replace(/\.jpg$/, '')],
+        { timeout: 60_000 },
+      );
+      return fs.existsSync(cached) ? fs.promises.readFile(cached) : null;
+    } catch (err) {
+      this.logger.warn(`Manual page ${page} of ${doc.id} could not be rendered: ${err}`);
+      return null;
+    }
   }
 
   /** Cosine similarity between two equal-length vectors */

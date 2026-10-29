@@ -17,8 +17,8 @@ import {
   type VerificationStatus,
 } from '../../entities/document-knowledge.entity.js';
 import { StorageService } from '../../common/storage.service.js';
-import { resolveDocumentFilePath } from '../../common/uploads-path.js';
-import { resolveAiConfig, type AiConfig } from '../../common/ai-config.js';
+import { DocumentFilesService } from '../../common/document-files.service.js';
+import { resolveAiConfig, reasoningOptions, stripThinking, type AiConfig } from '../../common/ai-config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -129,6 +129,7 @@ export class KnowledgeService implements OnModuleInit {
     @InjectRepository(DocumentEntity)
     private readonly documentRepo: Repository<DocumentEntity>,
     private readonly storageService: StorageService,
+    private documentFiles: DocumentFilesService,
     private readonly configService: ConfigService,
   ) {
     this.ai = resolveAiConfig(this.configService);
@@ -352,6 +353,7 @@ export class KnowledgeService implements OnModuleInit {
       model: this.ai.visionModel,
       temperature: 0,
       max_tokens: this.budget.scanMaxTokens,
+      ...(reasoningOptions(this.ai.visionModel) as {}),
       messages: [
         { role: 'system', content: SCAN_PROMPT },
         {
@@ -364,7 +366,7 @@ export class KnowledgeService implements OnModuleInit {
       ],
     });
     const choice = res.choices[0];
-    return { text: (choice?.message?.content ?? '').trim(), finish: choice?.finish_reason };
+    return { text: stripThinking(choice?.message?.content ?? ''), finish: choice?.finish_reason };
   }
 
   /** Render the top and bottom halves of one page (with a small overlap) for dense pages. */
@@ -645,10 +647,10 @@ export class KnowledgeService implements OnModuleInit {
       temperature: 0,
       max_tokens: maxTokens,
       response_format: { type: 'json_object' },
-      // gpt-oss on Groq is a reasoning model; reasoning tokens count toward max_tokens
-      ...(model.startsWith('openai/gpt-oss') ? { reasoning_effort: 'low' as const } : {}),
+      // Reasoning tokens count toward max_tokens
+      ...(reasoningOptions(model) as {}),
     });
-    const text = res.choices[0]?.message?.content ?? '{}';
+    const text = stripThinking(res.choices[0]?.message?.content ?? '{}');
     try {
       return JSON.parse(text);
     } catch {
@@ -656,15 +658,9 @@ export class KnowledgeService implements OnModuleInit {
     }
   }
 
+  /** R2, local disk, or the database backup (restored to disk if the host wiped it). */
   private async loadPdf(fileUrl: string): Promise<Buffer> {
-    if (this.storageService.isEnabled()) {
-      return this.storageService.download(this.storageService.keyFromFileUrl(fileUrl));
-    }
-    const filePath = resolveDocumentFilePath(fileUrl);
-    if (!fsSync.existsSync(filePath)) {
-      throw new Error('PDF file is no longer on the server (local uploads are lost on redeploy) — upload it again');
-    }
-    return fs.readFile(filePath);
+    return this.documentFiles.readByUrl(fileUrl);
   }
 
   private async pageCount(pdfPath: string): Promise<number> {

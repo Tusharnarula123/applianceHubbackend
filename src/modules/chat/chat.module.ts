@@ -25,6 +25,8 @@ import { KnowledgeService } from './knowledge.service.js';
 import { KnowledgeController } from './knowledge.controller.js';
 import { CacheService } from '../../common/cache.service.js';
 import { StorageService } from '../../common/storage.service.js';
+import { DocumentFilesService } from '../../common/document-files.service.js';
+import { DocumentBlobEntity } from '../../entities/document-blob.entity.js';
 import { ActivityModule } from '../activities/activity.module.js';
 import { CasesModule } from '../cases/cases.module.js';
 import { RepairService } from '../repair/repair.service.js';
@@ -47,6 +49,7 @@ import { RepairNotificationService } from '../repair/notification.service.js';
       DocumentEntity,
       DocumentChunkEntity,
       DocumentKnowledgeEntity,
+      DocumentBlobEntity,
       RepairAgentEntity,
       RepairRequestEntity,
       RepairReviewEntity,
@@ -62,10 +65,11 @@ import { RepairNotificationService } from '../repair/notification.service.js';
     KnowledgeService,
     CacheService,
     StorageService,
+    DocumentFilesService,
     RepairService,
     SparePartsService,
     RepairNotificationService,
   ],
-  exports: [ChatService, AiChatService, RagService, KnowledgeService],
+  exports: [ChatService, AiChatService, RagService, KnowledgeService, DocumentFilesService],
 })
 export class ChatModule {}

@@ -665,12 +665,15 @@ export class AiChatService {
     ];
 
     // 6. Run the tool-calling loop
-    const { finalContent, toolCallsMade, pdfUrls, imageUrls, actionCards } = await this.runToolLoop(
+    const { finalContent: rawContent, toolCallsMade, pdfUrls, imageUrls, actionCards } = await this.runToolLoop(
       openaiMessages,
       appliance,
       customerContext,
       sessionId,
     );
+
+    // Visual guide steps get the manual page they cite as an image (rendered for free from the PDF)
+    const finalContent = await this.attachGuidePages(rawContent, appliance.id, rag.excerpts ?? []);
 
     // 6. Save assistant reply to DB
     await this.messageRepo.save(
@@ -742,6 +745,51 @@ export class AiChatService {
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
+
+  /** Add a manual page image to each visual-guide step that names a page. */
+  private async attachGuidePages(
+    content: string,
+    applianceId: string,
+    excerpts: Array<{ page_index: number; document_id: string }>,
+  ): Promise<string> {
+    if (!content.includes('```visual-guide')) return content;
+    const baseUrl = (
+      this.configService.get<string>('API_PUBLIC_URL') ??
+      this.configService.get<string>('APP_BASE_URL') ??
+      'http://localhost:3001'
+    ).replace(/\/$/, '');
+    // Pages from verified knowledge may not be in this turn's excerpts — fall back to the newest manual
+    let fallbackDoc: string | null | undefined;
+    const docForPage = async (page: number) => {
+      const hit = excerpts.find((e) => e.page_index === page) ?? excerpts[0];
+      if (hit) return hit.document_id;
+      if (fallbackDoc === undefined) {
+        fallbackDoc = await this.ragService.latestManualId(applianceId);
+      }
+      return fallbackDoc;
+    };
+
+    const blocks = [...content.matchAll(/```visual-guide\r?\n([\s\S]*?)```/g)];
+    let out = content;
+    for (const block of blocks) {
+      let guide: any;
+      try {
+        guide = JSON.parse(block[1]);
+      } catch {
+        continue; // the app shows unparseable guides as plain text
+      }
+      if (!Array.isArray(guide?.steps)) continue;
+      for (const step of guide.steps) {
+        const page = Number(step?.page);
+        if (!Number.isInteger(page) || page < 1) continue;
+        const docId = await docForPage(page);
+        if (docId) step.page_image = `${baseUrl}/api/chat/ai/${applianceId}/manual-page/${docId}/${page}`;
+      }
+      out = out.replace(block[0], '```visual-guide\n' + JSON.stringify(guide) + '\n```');
+    }
+    return out;
+  }
+
 
   private buildSystemPrompt(
     appliance: ApplianceEntity,
@@ -815,30 +863,26 @@ TOOL USE GUIDELINES:
 - If data is not found, say so clearly and offer to create a new record.
 - Keep replies concise, actionable, and in the configured tone above.
 
-FLOWCHART RULES (for procedures with 3 or more steps):
-- Include a Mermaid diagram. Start with a %% title: comment.
-- Use classDef to colour nodes: action=blue, decision=teal, done=green, warn=red.
-- Add emoji at the start of every node label (🔧🔍❓✅⚠️🛠️💧🧹🔩).
-- Use {braces} for decisions, [( )] for rounded start/end terminals, [ ] for action steps.
-- Example:
-\`\`\`mermaid
-%% title: Fix Drain Issue
-flowchart TD
-  classDef action fill:#1a5f8a,stroke:#0f3f5c,color:#fff
-  classDef decision fill:#0d7e72,stroke:#085e55,color:#fff
-  classDef done fill:#059669,stroke:#047857,color:#fff
-  classDef warn fill:#dc2626,stroke:#b91c1c,color:#fff
-  A([🔍 Start here]):::done --> B{💧 Water in tub?}:::decision
-  B -- Yes --> C[🧹 Clean drain filter]:::action
-  B -- No --> D[🔩 Check drain hose]:::action
-  C --> E([✅ Done]):::done
+VISUAL GUIDE (for any procedure with 2 or more steps the customer does themselves):
+- Present the steps as a visual guide block instead of a numbered list. The app draws each step as an illustrated card and shows the matching manual page next to it. Example:
+\`\`\`visual-guide
+{"title":"Clean the drain pump filter","steps":[
+  {"title":"Switch off and unplug","detail":"Turn the washer off and pull the plug from the socket.","icon":"power","page":24},
+  {"title":"Open the filter flap","detail":"Press the flap at the bottom-right corner to open it.","icon":"door","page":24},
+  {"title":"Drain the water","detail":"Put a shallow tray underneath, pull out the hose and remove its cap.","icon":"water","page":24,"caution":"Water may be hot after a hot wash."}
+]}
 \`\`\`
-- Keep node text under 5 words after the emoji. Never draw a flowchart for a safety stop.
+- Valid JSON only. 2–8 steps. "title" is at most 6 words; "detail" is one or two short sentences.
+- "icon" is one of: power, plug, water, drain, filter, clean, door, screw, tool, settings, display, timer, temperature, level, hose, check, warning, search, phone.
+- "page" is the manual page the step comes from — only when the manual excerpts or verified knowledge give it. Leave it out otherwise; never guess a page.
+- "caution" only for a real warning printed in the manual or an obvious hazard.
+- Keep your short text answer (From your manual / Likely cause / If that doesn't work) around the block, but do not repeat the steps as a list.
+- For a decision tree with branches (e.g. "if the light blinks… otherwise…"), you may add a small Mermaid flowchart after the guide: start it with %% title:, use {braces} for decisions, keep node text under 5 words.
+- Never draw a visual guide or flowchart for a safety stop.
 
 VIDEOS: for a hands-on procedure that is safe for a customer, you may call search_youtube and put the top result URL on its own line (https://youtu.be/VIDEO_ID). Skip it for safety stops, warranty or account questions.
 
-IMAGE RULES:
-- After flowchart and YouTube link, embed relevant manual page images: ![description](url)
+IMAGES: manual pages are attached to the visual guide automatically from "page" — do not paste image links yourself.${this.ai.supportsImageGeneration ? ' Call generate_image only when the customer explicitly asks for a picture of something the manual cannot show.' : ''}
 
 Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`;
   }

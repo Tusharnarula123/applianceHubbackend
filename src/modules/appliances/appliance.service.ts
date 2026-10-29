@@ -216,10 +216,14 @@ export class ApplianceService {
    * Update appliance
    */
   async update(applianceId: string, businessId: string, data: Partial<ApplianceEntity>) {
-    await this.applianceRepository.update(applianceId, data);
+    const { business_id: _ignored, ...changes } = data as any;
+    await this.applianceRepository.update(applianceId, changes);
 
-    // Invalidate all related caches
-    await this.cacheService.invalidateApplianceCaches(applianceId, businessId);
+    // Invalidate all related caches — the dashboard list is keyed by business, so
+    // look it up when the caller left it out (otherwise a publish never shows)
+    const owner = businessId
+      || (await this.applianceRepository.findOne({ where: { id: applianceId }, select: ['id', 'business_id'] }))?.business_id;
+    await this.cacheService.invalidateApplianceCaches(applianceId, owner);
 
     return this.getApplianceById(applianceId);
   }

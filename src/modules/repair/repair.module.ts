@@ -12,6 +12,7 @@ import { ApplianceEntity } from '../../entities/appliance.entity.js';
 import { RepairService } from './repair.service.js';
 import { SparePartsService } from './spare-parts.service.js';
 import { RepairNotificationService } from './notification.service.js';
+import { CasesModule } from '../cases/cases.module.js';
 
 import {
   RepairAgentController,
@@ -24,6 +25,8 @@ import {
 @Module({
   imports: [
     ConfigModule,
+    // ChannelsService (email / WhatsApp) for job notifications
+    CasesModule,
     TypeOrmModule.forFeature([
       RepairAgentEntity,
       RepairRequestEntity,

@@ -41,3 +41,19 @@ export function resolveAiConfig(config: ConfigService): AiConfig {
     supportsImageGeneration: true,
   };
 }
+
+/**
+ * Keep reasoning models from spending the output budget on thinking.
+ * gpt-oss: low effort. Qwen3 on Groq: instruct mode — otherwise the
+ * <think> block lands in the content and truncates page transcriptions.
+ */
+export function reasoningOptions(model: string): Record<string, string> {
+  if (model.startsWith('openai/gpt-oss')) return { reasoning_effort: 'low' };
+  if (model.startsWith('qwen/qwen3')) return { reasoning_effort: 'none' };
+  return {};
+}
+
+/** Drop any <think>…</think> block a reasoning model left in its answer. */
+export function stripThinking(text: string): string {
+  return text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim();
+}

@@ -7,7 +7,10 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  NotFoundException,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiParam, ApiBody } from '@nestjs/swagger';
 import { AiChatService } from './ai-chat.service.js';
@@ -47,6 +50,23 @@ export class AiChatController {
   @ApiParam({ name: 'applianceId', description: 'Appliance UUID' })
   async getKnowledgeMedia(@Param('applianceId') applianceId: string) {
     return this.ragService.getChatKnowledgeMedia(applianceId);
+  }
+
+  /**
+   * GET /api/chat/ai/:applianceId/manual-page/:documentId/:page
+   * A page of an uploaded manual as an image — shown on visual-guide step cards.
+   */
+  @Get(':applianceId/manual-page/:documentId/:page')
+  @ApiOperation({ summary: 'Render one manual page as a JPEG' })
+  async getManualPage(
+    @Param('applianceId') applianceId: string,
+    @Param('documentId') documentId: string,
+    @Param('page') page: string,
+    @Res() res: Response,
+  ) {
+    const image = await this.ragService.renderManualPage(applianceId, documentId, parseInt(page, 10));
+    if (!image) throw new NotFoundException('Manual page not available');
+    res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' }).send(image);
   }
 
   /**

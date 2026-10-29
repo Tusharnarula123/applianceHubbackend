@@ -42,6 +42,20 @@ async function bootstrap() {
   );
   if (!r2Configured) {
     app.useStaticAssets(getUploadsDir(), { prefix: '/uploads/' });
+    // Disk wiped by a redeploy/sleep: serve (and restore) the database copy instead of a 404
+    const { DocumentFilesService } = await import('./common/document-files.service.js');
+    const documentFiles = app.get(DocumentFilesService, { strict: false });
+    app.use('/uploads', async (req: any, res: any, next: any) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+      const name = req.path.split('/').filter(Boolean).pop();
+      if (!name) return next();
+      try {
+        const buffer = await documentFiles.readByUrl(`/uploads/${name}`);
+        res.type(name.slice(name.lastIndexOf('.'))).send(buffer);
+      } catch {
+        next();
+      }
+    });
   }
 
   // Correct client IP behind reverse proxy (used by rate limiting)

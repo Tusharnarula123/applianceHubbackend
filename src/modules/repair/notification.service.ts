@@ -3,12 +3,16 @@ import { ConfigService } from '@nestjs/config';
 import { RepairAgentEntity } from '../../entities/repair-agent.entity.js';
 import { RepairRequestEntity } from '../../entities/repair-request.entity.js';
 import { PartsOrderEntity } from '../../entities/parts-order.entity.js';
+import { ChannelsService } from '../engagement/channels.service.js';
 
 @Injectable()
 export class RepairNotificationService {
   private readonly logger = new Logger(RepairNotificationService.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly channels: ChannelsService,
+  ) {}
 
   /* ── Agent assignment notification ── */
   async notifyAgentAssigned(
@@ -17,8 +21,8 @@ export class RepairNotificationService {
   ): Promise<void> {
     const msg = this.buildAssignmentMessage(agent, request);
     await Promise.allSettled([
-      this.sendEmail(agent.email, `New Repair Job Assigned — ${request.customer_name}`, msg.html),
-      agent.whatsapp ? this.sendWhatsApp(agent.whatsapp, msg.text) : Promise.resolve(),
+      agent.email ? this.sendEmail(agent.email, `New Repair Job Assigned — ${request.customer_name}`, msg.html) : Promise.resolve(),
+      agent.whatsapp ? this.sendWhatsApp(agent.whatsapp, msg.text, [agent.name, request.customer_name, msg.text]) : Promise.resolve(),
     ]);
   }
 
@@ -107,85 +111,31 @@ export class RepairNotificationService {
     return { html, text };
   }
 
-  /**
-   * Send email using the configured SMTP / SendGrid / SES credentials.
-   * Falls back to console.log if not configured (dev mode).
-   */
+  /** Email through the shared channel (MailerSend or SendGrid); logged only when neither is configured. */
   private async sendEmail(to: string, subject: string, html: string): Promise<void> {
-    try {
-      const apiKey = this.config.get<string>('SENDGRID_API_KEY');
-      const fromEmail = this.config.get<string>('FROM_EMAIL') ?? 'noreply@scana.ai';
-
-      if (!apiKey) {
-        this.logger.warn(`[EMAIL-DEV] To: ${to} | Subject: ${subject}`);
-        this.logger.debug(html.replace(/<[^>]+>/g, '').trim().slice(0, 200));
-        return;
-      }
-
-      const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          personalizations: [{ to: [{ email: to }] }],
-          from: { email: fromEmail, name: 'Scana.ai' },
-          subject,
-          content: [{ type: 'text/html', value: html }],
-        }),
-      });
-
-      if (!res.ok) {
-        this.logger.error(`SendGrid error ${res.status}: ${await res.text()}`);
-      } else {
-        this.logger.log(`Email sent to ${to}: ${subject}`);
-      }
-    } catch (err: any) {
-      this.logger.error(`Email failed: ${err?.message ?? err}`);
+    if (!this.channels.mailProvider()) {
+      this.logger.warn(`[EMAIL-DEV] To: ${to} | Subject: ${subject}`);
+      return;
     }
+    const res = await this.channels.email(to, subject, html);
+    if (res.ok) this.logger.log(`Email sent to ${to}: ${subject}`);
+    else this.logger.error(`Email to ${to} failed: ${res.error}`);
   }
 
   /**
-   * Send WhatsApp message via Twilio API.
-   * Requires TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM in env.
+   * WhatsApp job alert: Meta Cloud API template (repair_assigned) when configured,
+   * otherwise Twilio plain text; logged only when neither is configured.
    */
-  private async sendWhatsApp(to: string, message: string): Promise<void> {
-    try {
-      const sid   = this.config.get<string>('TWILIO_ACCOUNT_SID');
-      const token = this.config.get<string>('TWILIO_AUTH_TOKEN');
-      const from  = this.config.get<string>('TWILIO_WHATSAPP_FROM') ?? 'whatsapp:+14155238886';
-
-      if (!sid || !token) {
-        this.logger.warn(`[WHATSAPP-DEV] To: ${to} | ${message.slice(0, 80)}`);
-        return;
-      }
-
-      const formData = new URLSearchParams({
-        From: from.startsWith('whatsapp:') ? from : `whatsapp:${from}`,
-        To: to.startsWith('whatsapp:') ? to : `whatsapp:${to}`,
-        Body: message,
-      });
-
-      const res = await fetch(
-        `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: formData.toString(),
-        },
-      );
-
-      if (!res.ok) {
-        this.logger.error(`Twilio error ${res.status}: ${await res.text()}`);
-      } else {
-        this.logger.log(`WhatsApp sent to ${to}`);
-      }
-    } catch (err: any) {
-      this.logger.error(`WhatsApp failed: ${err?.message ?? err}`);
+  private async sendWhatsApp(to: string, message: string, vars: [string, string, string]): Promise<void> {
+    const twilio = Boolean(this.config.get('TWILIO_ACCOUNT_SID') && this.config.get('TWILIO_AUTH_TOKEN'));
+    if (!this.channels.metaWhatsappReady() && !twilio) {
+      this.logger.warn(`[WHATSAPP-DEV] To: ${to} | ${message.slice(0, 80)}`);
+      return;
     }
+    const res = this.channels.metaWhatsappReady()
+      ? await this.channels.whatsapp(to, 'repair_assigned', vars)
+      : await this.channels.whatsappTwilio(to, message);
+    if (res.ok) this.logger.log(`WhatsApp sent to ${to}`);
+    else this.logger.error(`WhatsApp to ${to} failed: ${res.error}`);
   }
 }

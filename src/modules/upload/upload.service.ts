@@ -11,6 +11,7 @@ import { KnowledgeService } from '../chat/knowledge.service.js';
 import { CacheService } from '../../common/cache.service.js';
 import { ActivityService } from '../activities/activity.service.js';
 import { StorageService } from '../../common/storage.service.js';
+import { DocumentFilesService } from '../../common/document-files.service.js';
 import {
   DocumentEntity,
   DOCUMENT_FILE_TYPES,
@@ -59,6 +60,7 @@ export class UploadService {
     private cacheService: CacheService,
     private activityService: ActivityService,
     private storageService: StorageService,
+    private documentFiles: DocumentFilesService,
   ) {}
 
   resolveDocumentType(documentType?: string): DocumentFileType {
@@ -125,6 +127,12 @@ export class UploadService {
     });
 
     const savedDocument = await this.documentRepository.save(document);
+    // Without R2 the local disk is temporary on hosts like Render — keep a database copy
+    try {
+      await this.documentFiles.backup(savedDocument.id, file.buffer, file.mimetype);
+    } catch (err) {
+      this.logger.warn(`Could not back up ${savedDocument.id} to the database: ${err}`);
+    }
     await this.invalidateApplianceDocumentCaches(applianceId);
     await this.activityService.logForAppliance(
       applianceId,
@@ -260,6 +268,7 @@ export class UploadService {
     }
 
     await this.documentRepository.remove(document);
+    await this.documentFiles.removeBackup(fileId).catch(() => undefined);
     await this.invalidateApplianceDocumentCaches(document.appliance_id, appliance?.business_id);
     this.logger.log(`Deleted document ${fileId} for appliance ${document.appliance_id}`);
 

@@ -18,7 +18,13 @@ import { RagService } from './rag.service.js';
 import {
   StartAiSessionDto,
   SendAiMessageDto,
+  SendAiVideoDto,
 } from './dto/ai-chat.dto.js';
+
+/** The Groq vision model accepts at most 3 images per request */
+const MAX_VIDEO_IMAGES = 3;
+const MAX_VIDEO_IMAGE_CHARS = 4_000_000;
+const JPEG_DATA_URL = /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/;
 
 @ApiTags('AI Chat')
 @Controller('api/chat/ai')
@@ -191,6 +197,41 @@ export class AiChatController {
       customer_name: body.customer_name,
       customer_email: body.customer_email,
     });
+  }
+
+  /**
+   * POST /api/chat/ai/session/:sessionId/video
+   *
+   * The customer showed the problem on camera. The browser sends a few still
+   * pictures from the clip (never the video); the vision model describes them
+   * and the assistant answers from the manual as usual. Pictures are not stored.
+   */
+  @Post('session/:sessionId/video')
+  @Throttle({ default: { limit: 6, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Send still pictures from a short clip and receive an AI response' })
+  @ApiParam({ name: 'sessionId', description: 'Chat session UUID' })
+  @ApiBody({ type: SendAiVideoDto })
+  async sendVideo(
+    @Param('sessionId') sessionId: string,
+    @Body() body: SendAiVideoDto,
+  ) {
+    const images = body?.images;
+    if (!Array.isArray(images) || images.length < 1 || images.length > MAX_VIDEO_IMAGES) {
+      throw new BadRequestException(`images must contain 1 to ${MAX_VIDEO_IMAGES} pictures`);
+    }
+    if (images.some((i) => typeof i !== 'string' || i.length > MAX_VIDEO_IMAGE_CHARS || !JPEG_DATA_URL.test(i))) {
+      throw new BadRequestException('Each picture must be a JPEG data URL under 4 MB');
+    }
+    return this.aiChatService.sendVideoMessage(
+      sessionId,
+      {
+        images,
+        note: typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '',
+        durationSeconds: Number(body.duration_seconds) || 0,
+      },
+      { customer_name: body.customer_name, customer_email: body.customer_email },
+    );
   }
 
   /**

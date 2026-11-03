@@ -100,6 +100,7 @@ const __dirname = dirname(__filename);
         migrations: [join(__dirname, 'database', 'migrations', '*.{ts,js}')],
         // Postgres (Render) has no SQL migrations — schema is built from entities when DB_SYNC=true
         synchronize: process.env.DB_SYNC === 'true',
+        migrationsRun: process.env.DB_MIGRATE === 'true',
         ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
         logging: process.env.NODE_ENV !== 'production',
       }) as TypeOrmModuleOptions,
